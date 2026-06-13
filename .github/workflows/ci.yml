@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+
+jobs:
+  build-test:
+    name: Lint · Typecheck · Test · Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: Build
+        run: pnpm build
+
+      - name: E2E smoke (no browser)
+        run: pnpm test:e2e
+
+      # Extensible OpenAPI step: generates the spec from the API and the typed
+      # client. TASK-015 turns this into an enforced drift gate
+      # (regenerate + `git diff --exit-code`).
+      - name: OpenAPI generation (drift hook)
+        run: |
+          pnpm --filter @b2b/api openapi:json
+          pnpm --filter @b2b/api-client generate
+
+      - name: Docs link check
+        run: node scripts/check-docs-links.mjs
+
+  integration:
+    name: Integration (real services)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Start infrastructure
+        run: |
+          cp .env.example .env
+          docker compose up -d
+
+      - name: Wait for services
+        run: bash scripts/wait-for-services.sh 120
+
+      - name: Infra connectivity smoke
+        run: node scripts/check-infra.mjs
+
+      - name: Integration tests
+        run: pnpm test:integration
+
+      - name: Tear down infrastructure
+        if: always()
+        run: docker compose down -v

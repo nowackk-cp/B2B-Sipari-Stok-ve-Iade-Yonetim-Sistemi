@@ -1,0 +1,52 @@
+name: Docker Validation
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - '.env.example'
+      - '**/Dockerfile'
+      - '.github/workflows/docker-validation.yml'
+
+jobs:
+  compose-config:
+    name: Validate compose + secret hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose configuration
+        run: |
+          cp .env.example .env
+          docker compose config
+
+      - name: Build Dockerfiles (if any exist)
+        run: |
+          shopt -s globstar nullglob
+          files=(**/Dockerfile)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Dockerfiles present yet — application images are added in a later milestone."
+          else
+            for df in "${files[@]}"; do
+              echo "Building ${df}"
+              docker build -f "${df}" "$(dirname "${df}")"
+            done
+          fi
+
+      - name: Secret hygiene check
+        run: |
+          set -e
+          # A real .env must never be committed (only .env.example is allowed).
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "ERROR: a committed .env file was found. Remove it." >&2
+            exit 1
+          fi
+          # Basic scan for accidentally committed private keys in tracked files.
+          if git grep -nI -e "BEGIN RSA PRIVATE KEY" -e "BEGIN OPENSSH PRIVATE KEY" -e "BEGIN PRIVATE KEY" -- . ':!*.example' >/dev/null 2>&1; then
+            echo "ERROR: a private key appears to be committed." >&2
+            exit 1
+          fi
+          echo "No committed .env or private keys detected."
