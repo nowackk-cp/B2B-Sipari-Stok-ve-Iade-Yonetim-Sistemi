@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+next-env.d.ts
+.turbo/
+*.tsbuildinfo
+
+# Prisma generated client
+packages/database/generated/
+packages/database/src/generated/
+
+# OpenAPI-generated artifacts
+packages/api-client/src/generated/
+apps/api/openapi.json
+
+# Test & coverage
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Environment / secrets (NEVER commit real secrets)
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Docker local data (named volumes are managed by docker, but ignore any bind dirs)
+infra/data/

@@ -1,0 +1,44 @@
+{
+  "name": "b2b-operations-suite",
+  "version": "0.0.0",
+  "private": true,
+  "description": "B2B Operations Suite — modular monolith back-office (foundation milestone)",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:unit": "turbo run test:unit",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "turbo run test:e2e",
+    "format": "prettier --write \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
+    "clean": "turbo run clean",
+    "gen:api-client": "pnpm --filter @b2b/api build && pnpm --filter @b2b/api openapi:json && pnpm --filter @b2b/api-client generate"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.16.0",
+    "@types/node": "20.17.10",
+    "eslint": "9.16.0",
+    "eslint-config-prettier": "9.1.0",
+    "globals": "15.14.0",
+    "prettier": "3.4.2",
+    "turbo": "2.3.3",
+    "typescript": "5.6.3",
+    "typescript-eslint": "8.18.0",
+    "vitest": "2.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@swc/core"
+    ]
+  }
+}

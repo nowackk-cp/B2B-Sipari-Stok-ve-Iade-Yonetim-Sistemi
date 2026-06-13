@@ -1,0 +1,20 @@
+// B2B Operations Suite — Prisma schema.
+//
+// FOUNDATION MILESTONE (1A): this schema intentionally contains NO domain
+// models. It declares only the datasource and generator so the package, its
+// scripts and migration directory are ready. The full domain schema
+// (identity / authz / scope / catalog / warehouses / customers, then stock /
+// orders / billing) is implemented in TASK-004 and later tasks per
+// docs/architecture/DATABASE_DESIGN.md.
+//
+// CHECK constraints, append-only triggers and partial-unique indexes are added
+// via hand-written SQL inside Prisma migrations (see DATABASE_DESIGN.md).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

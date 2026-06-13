@@ -1,0 +1,42 @@
+{
+  "name": "@b2b/database",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Prisma database package skeleton (schema, migrations, seed). Domain schema lands in TASK-004.",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "prisma"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "tsx src/seed.ts",
+    "db:studio": "prisma studio",
+    "clean": "node -e \"['dist','.turbo','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
+  },
+  "prisma": {
+    "schema": "prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@b2b/logger": "workspace:*",
+    "@prisma/client": "5.22.0"
+  },
+  "devDependencies": {
+    "prisma": "5.22.0",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3"
+  }
+}

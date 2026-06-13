@@ -1,0 +1,12 @@
+# Normalize line endings to LF for all text files (cross-platform CI consistency)
+* text=auto eol=lf
+
+# Lockfiles and generated artifacts are treated as text but never diffed in PRs
+pnpm-lock.yaml -diff linguist-generated=true
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

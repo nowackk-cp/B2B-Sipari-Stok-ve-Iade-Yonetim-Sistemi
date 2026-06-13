@@ -1,0 +1,29 @@
+{
+  "name": "@b2b/ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared UI primitives and design tokens. shadcn/ui components land in Phase 7.",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "clean": "node -e \"['dist','.turbo','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
+  }
+}

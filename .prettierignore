@@ -1,0 +1,18 @@
+node_modules
+dist
+.next
+.turbo
+coverage
+pnpm-lock.yaml
+playwright-report
+test-results
+packages/database/generated
+packages/api-client/src/generated
+apps/api/openapi.json
+**/*.tsbuildinfo
+
+# Authored prose documents (maintained by hand, not Prettier-formatted)
+docs/
+PROJECT_SPEC.md
+CLAUDE.md
+AGENTS.md
