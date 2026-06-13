@@ -116,9 +116,15 @@ Repository   → Prisma erişimi (modül içine kapalı)
 ## 6. Asenkron İş / Outbox (A-08/A-07)
 
 - Para/stok etkileyen senkron işlemler **inline transaction** içinde yapılır (job'a ertelenmez).
-- **Business audit** mutasyonla **aynı transaction** içinde yazılır — outbox değil (A-07). Outbox yalnız non-authoritative yan etkiler içindir (e-posta, PDF, export, bildirim).
+- **Business audit** mutasyonla **aynı transaction** içinde yazılır — outbox/event consumer **değil** (A-07). Outbox yalnız non-authoritative yan etkiler içindir (e-posta, PDF, export, bildirim). Business audit asla outbox veya effect receipt üzerinden async yazılmaz.
 - Yan etkiler **transactional outbox** ile: ana transaction içinde `outbox_events` satırı (`UNIQUE(deduplication_key)`) yazılır, dispatcher claim/lease (`FOR UPDATE SKIP LOCKED`) ile çeker. "DB commit oldu ama mail gitmedi / mail gitti ama DB rollback oldu" tutarsızlığı önlenir.
-- **Queue at-least-once varsayımı (A-08):** worker dış etkiyi ürettikten sonra job yeniden teslim edilebilir. Çift e-posta/PDF/export/bildirim/fatura işlemi olmaması için her yan etki **DB-level idempotency** (`effect_receipts(effect_type, idempotency_key UNIQUE)`) veya **idempotent provider key** ile korunur. Dış çağrıdan **önce** `INSERT ... ON CONFLICT DO NOTHING` ile receipt alınır; conflict → etki zaten yapılmış.
+- **Queue at-least-once varsayımı (A-08):** worker dış etkiyi ürettikten sonra job yeniden teslim edilebilir. Hem **çift** hem **kayıp** etkiyi önlemek için her yan etki `effect_receipts` **state modeli** ile korunur — `(effect_type, effect_key) UNIQUE` + zorunlu `provider_idempotency_key` (bkz. [ADR-008](../decisions/ADR-008-outbox-and-idempotency.md), [DATABASE_DESIGN §14](DATABASE_DESIGN.md)):
+  - Effect durumları: `PLANNED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN`.
+  - Dış çağrıdan **önce** receipt `PLANNED`/`IN_PROGRESS` yazılır; mevcut kayıt `FOR UPDATE` ile okunur. **Receipt'in salt varlığı başarı değildir — yalnız `SUCCEEDED` başarıdır;** receipt external işlemden önce asla `SUCCEEDED` olamaz.
+  - Dış çağrı **`provider_idempotency_key`** ile yapılır; başarı → `SUCCEEDED`, hata → `FAILED`, belirsiz → `UNKNOWN`.
+  - **Outbox event yalnız ilgili effect `SUCCEEDED` olduktan sonra `processed` sayılır.**
+  - Crash **dış çağrı öncesi** (`PLANNED`/`IN_PROGRESS`) → retry **aynı effect_key** ile devam eder, **kayıp etki yok**. Crash **dış çağrı sonrası / DB update öncesi** → retry **aynı `provider_idempotency_key`** ile yapılır, sağlayıcı çift etkiyi önler.
+  - **Provider idempotency desteklemiyorsa** exactly-once **garanti edilmez**; status `UNKNOWN` + **manuel inceleme** alarmı.
 - `job_logs` yalnız **gözlem** içindir, idempotency guard değildir.
 
 ## 7. Ortamlar
