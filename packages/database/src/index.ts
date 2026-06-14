@@ -19,3 +19,5 @@ export { prisma, connectDatabase, disconnectDatabase } from './client';
 export { withTransaction } from './transaction';
 export type { TransactionClient, TransactionOptions } from './transaction';
 export { resolveDatabaseUrl, isProduction } from './env';
+export { seed } from './seed';
+export type { SeedReport } from './seed';
