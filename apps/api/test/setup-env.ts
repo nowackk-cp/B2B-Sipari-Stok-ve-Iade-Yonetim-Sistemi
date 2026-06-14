@@ -14,6 +14,8 @@ const TEST_ENV: Record<string, string> = {
   SMTP_HOST: 'localhost',
   API_PORT: '3001',
   SWAGGER_ENABLED: 'false',
+  // Auth: a >=32-char dev-only signing secret so config validation passes.
+  JWT_ACCESS_SECRET: 'test-only-access-secret-at-least-32-characters-long',
 };
 
 for (const [key, value] of Object.entries(TEST_ENV)) {

@@ -3,9 +3,9 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { REQUEST_ID_HEADER } from '@b2b/contracts';
-import { AppModule } from '../src/app.module';
-import { AppConfigService } from '../src/common/config/app-config.service';
-import { configureApp } from '../src/bootstrap';
+import { AppModule } from '../../src/app.module';
+import { AppConfigService } from '../../src/common/config/app-config.service';
+import { configureApp } from '../../src/bootstrap';
 
 describe('API foundation (integration)', () => {
   let app: INestApplication;

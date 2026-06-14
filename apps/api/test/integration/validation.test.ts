@@ -3,9 +3,9 @@ import { IsString } from 'class-validator';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { AppModule } from '../src/app.module';
-import { AppConfigService } from '../src/common/config/app-config.service';
-import { configureApp } from '../src/bootstrap';
+import { AppModule } from '../../src/app.module';
+import { AppConfigService } from '../../src/common/config/app-config.service';
+import { configureApp } from '../../src/bootstrap';
 
 /**
  * Test-only DTO + controller. These exist ONLY inside this integration test so
