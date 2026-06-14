@@ -1,8 +1,8 @@
 {
-  "name": "@b2b/shared",
+  "name": "@b2b/domain",
   "version": "0.0.0",
   "private": true,
-  "description": "Framework-agnostic shared types and constants (HTTP contracts, health, error codes).",
+  "description": "Pure business domain: status enums, state-machine vocabulary and the RBAC catalog. Framework-independent — NO NestJS, Next.js, Prisma or Pino imports.",
   "type": "commonjs",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -44,12 +44,12 @@ importers:
       '@b2b/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@b2b/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@b2b/logger':
         specifier: workspace:*
         version: link:../../packages/logger
-      '@b2b/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       '@nestjs/common':
         specifier: 10.4.15
         version: 10.4.15(class-transformer@0.5.1)(class-validator@0.14.1)(reflect-metadata@0.2.2)(rxjs@7.8.1)
@@ -114,9 +114,9 @@ importers:
       '@b2b/config':
         specifier: workspace:*
         version: link:../../packages/config
-      '@b2b/shared':
+      '@b2b/contracts':
         specifier: workspace:*
-        version: link:../../packages/shared
+        version: link:../../packages/contracts
       '@b2b/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -151,9 +151,6 @@ importers:
       '@b2b/logger':
         specifier: workspace:*
         version: link:../../packages/logger
-      '@b2b/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       '@nestjs/common':
         specifier: 10.4.15
         version: 10.4.15(class-transformer@0.5.1)(class-validator@0.14.1)(reflect-metadata@0.2.2)(rxjs@7.8.1)
@@ -197,9 +194,9 @@ importers:
 
   packages/api-client:
     dependencies:
-      '@b2b/shared':
+      '@b2b/contracts':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../contracts
     devDependencies:
       openapi-typescript:
         specifier: 7.4.4
@@ -224,8 +221,20 @@ importers:
         specifier: 2.1.8
         version: 2.1.8(@types/node@20.17.10)(terser@5.48.0)
 
+  packages/contracts:
+    devDependencies:
+      typescript:
+        specifier: 5.6.3
+        version: 5.6.3
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@20.17.10)(terser@5.48.0)
+
   packages/database:
     dependencies:
+      '@b2b/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@b2b/logger':
         specifier: workspace:*
         version: link:../logger
@@ -243,6 +252,15 @@ importers:
         specifier: 5.6.3
         version: 5.6.3
 
+  packages/domain:
+    devDependencies:
+      typescript:
+        specifier: 5.6.3
+        version: 5.6.3
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@20.17.10)(terser@5.48.0)
+
   packages/logger:
     dependencies:
       pino:
@@ -252,15 +270,6 @@ importers:
       pino-pretty:
         specifier: 13.0.0
         version: 13.0.0
-    devDependencies:
-      typescript:
-        specifier: 5.6.3
-        version: 5.6.3
-      vitest:
-        specifier: 2.1.8
-        version: 2.1.8(@types/node@20.17.10)(terser@5.48.0)
-
-  packages/shared:
     devDependencies:
       typescript:
         specifier: 5.6.3

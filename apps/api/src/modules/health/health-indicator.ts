@@ -1,4 +1,4 @@
-import type { ComponentHealth } from '@b2b/shared';
+import type { ComponentHealth } from '@b2b/contracts';
 
 /**
  * A readiness probe for a single dependency (DB, Redis, storage, ...).

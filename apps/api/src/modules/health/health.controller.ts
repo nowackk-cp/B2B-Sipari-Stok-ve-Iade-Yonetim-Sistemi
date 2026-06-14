@@ -1,7 +1,7 @@
 import { Controller, Get, Res } from '@nestjs/common';
 import { ApiOkResponse, ApiServiceUnavailableResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import type { HealthStatus } from '@b2b/shared';
+import type { HealthStatus } from '@b2b/contracts';
 import { HealthStatusDto } from './health.dto';
 import { HealthService } from './health.service';
 

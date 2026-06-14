@@ -16,7 +16,7 @@
   "dependencies": {
     "@b2b/config": "workspace:*",
     "@b2b/logger": "workspace:*",
-    "@b2b/shared": "workspace:*",
+    "@b2b/contracts": "workspace:*",
     "@nestjs/common": "10.4.15",
     "@nestjs/core": "10.4.15",
     "@nestjs/platform-express": "10.4.15",

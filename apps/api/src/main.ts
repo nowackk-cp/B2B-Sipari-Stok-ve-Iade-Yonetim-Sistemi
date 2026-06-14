@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import type { Logger } from '@b2b/logger';
-import { API_DOCS_PATH, API_GLOBAL_PREFIX } from '@b2b/shared';
+import { API_DOCS_PATH, API_GLOBAL_PREFIX } from '@b2b/contracts';
 import { AppModule } from './app.module';
 import { APP_LOGGER } from './app.constants';
 import { AppConfigService } from './common/config/app-config.service';

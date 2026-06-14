@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { ComponentHealth, HealthState, HealthStatus } from '@b2b/shared';
+import type { ComponentHealth, HealthState, HealthStatus } from '@b2b/contracts';
 import { APP_VERSION, HEALTH_INDICATORS, SERVICE_NAME } from '../../app.constants';
 import { AppConfigService } from '../../common/config/app-config.service';
 import type { HealthIndicator } from './health-indicator';

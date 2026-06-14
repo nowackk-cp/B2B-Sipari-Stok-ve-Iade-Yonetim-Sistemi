@@ -1,8 +1,8 @@
 {
-  "name": "@b2b/api-client",
+  "name": "@b2b/contracts",
   "version": "0.0.0",
   "private": true,
-  "description": "Typed API client consumed by the web app. OpenAPI-generated types are wired in TASK-015.",
+  "description": "Framework-agnostic HTTP/public API contracts (problem details, error codes, health, API constants). No Prisma, no framework deps.",
   "type": "commonjs",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,14 +20,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:unit": "vitest run",
-    "generate": "openapi-typescript ../../apps/api/openapi.json -o src/generated/schema.ts",
     "clean": "node -e \"['dist','.turbo','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
   },
-  "dependencies": {
-    "@b2b/contracts": "workspace:*"
-  },
   "devDependencies": {
-    "openapi-typescript": "7.4.4",
     "typescript": "5.6.3",
     "vitest": "2.1.8"
   }

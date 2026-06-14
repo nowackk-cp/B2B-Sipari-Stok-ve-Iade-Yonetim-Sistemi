@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import type { ComponentHealth, HealthState, HealthStatus } from '@b2b/shared';
+import type { ComponentHealth, HealthState, HealthStatus } from '@b2b/contracts';
 
 /** Swagger view-model for the health payload (documentation only). */
 export class HealthStatusDto implements HealthStatus {

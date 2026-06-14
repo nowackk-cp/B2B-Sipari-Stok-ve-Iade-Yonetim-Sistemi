@@ -1,4 +1,4 @@
-import type { HealthStatus, ProblemDetails } from '@b2b/shared';
+import type { HealthStatus, ProblemDetails } from '@b2b/contracts';
 import { buildUrl } from './url';
 
 export interface ApiClientOptions {

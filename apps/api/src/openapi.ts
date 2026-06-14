@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { NestFactory } from '@nestjs/core';
-import { API_GLOBAL_PREFIX } from '@b2b/shared';
+import { API_GLOBAL_PREFIX } from '@b2b/contracts';
 import { AppModule } from './app.module';
 import { buildOpenApiDocument } from './bootstrap';
 

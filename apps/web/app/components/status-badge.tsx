@@ -1,4 +1,4 @@
-import type { HealthState } from '@b2b/shared';
+import type { HealthState } from '@b2b/contracts';
 import { cn } from '@b2b/ui';
 
 const LABELS: Record<HealthState | 'pending', string> = {

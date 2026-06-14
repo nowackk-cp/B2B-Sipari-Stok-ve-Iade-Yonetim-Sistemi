@@ -36,8 +36,8 @@ export default tseslint.config(
       'no-empty': ['error', { allowEmptyCatch: false }],
     },
   },
-  // Boundary rule (Mutlak Kural #1): the frontend must never reach the DB
-  // directly. Forbid Prisma / database-package imports inside apps/web.
+  // Boundary rule (Mutlak Kural #1): the frontend must never reach the DB or
+  // the server-side domain directly. Allowed flow: web → api-client → contracts.
   {
     files: ['apps/web/**/*.{ts,tsx}'],
     rules: {
@@ -50,11 +50,60 @@ export default tseslint.config(
               message: 'Frontend must not access the database directly. Use @b2b/api-client.',
             },
             {
+              name: '@b2b/domain',
+              message:
+                'Frontend must not import the server domain. Use @b2b/api-client / @b2b/contracts.',
+            },
+            {
               name: '@prisma/client',
               message: 'Frontend must not access Prisma directly. Use @b2b/api-client.',
             },
           ],
-          patterns: ['@b2b/database/*', '@prisma/*', 'prisma'],
+          patterns: ['@b2b/database/*', '@b2b/domain/*', '@prisma/*', 'prisma'],
+        },
+      ],
+    },
+  },
+  // Boundary rule: @b2b/domain is pure. No persistence, framework or logging
+  // deps may leak into it (Mutlak Kural #2 / MODULE_BOUNDARIES).
+  {
+    files: ['packages/domain/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@prisma/*', 'prisma', '@b2b/database', '@b2b/database/*'],
+              message: 'Domain must not depend on Prisma/database.',
+            },
+            {
+              group: ['@nestjs/*', 'next', 'next/*', 'pino', '@b2b/logger'],
+              message: 'Domain must stay framework- and logger-independent.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  // Boundary rule: @b2b/contracts is the public HTTP contract surface. It must
+  // never export Prisma types or depend on a framework.
+  {
+    files: ['packages/contracts/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@prisma/*', 'prisma', '@b2b/database', '@b2b/database/*'],
+              message: 'Contracts must not depend on or re-export Prisma.',
+            },
+            {
+              group: ['@nestjs/*', 'next', 'next/*'],
+              message: 'Contracts must stay framework-independent.',
+            },
+          ],
         },
       ],
     },

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { ComponentHealth } from '@b2b/shared';
+import type { ComponentHealth } from '@b2b/contracts';
 import type { HealthIndicator } from '../health-indicator';
 
 /** Trivially-passing indicator proving the process can serve requests. */

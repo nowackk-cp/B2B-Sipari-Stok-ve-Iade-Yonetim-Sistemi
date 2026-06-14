@@ -1,5 +1,5 @@
 import { HttpException, HttpStatus } from '@nestjs/common';
-import type { ErrorCode, ProblemDetails, ProblemFieldError } from '@b2b/shared';
+import type { ErrorCode, ProblemDetails, ProblemFieldError } from '@b2b/contracts';
 
 const STATUS_TO_CODE: Partial<Record<number, ErrorCode>> = {
   [HttpStatus.BAD_REQUEST]: 'VALIDATION_ERROR',

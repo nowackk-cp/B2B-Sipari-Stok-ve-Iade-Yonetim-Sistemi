@@ -1,4 +1,4 @@
-import type { HealthStatus } from '@b2b/shared';
+import type { HealthStatus } from '@b2b/contracts';
 import { StatusBadge } from './components/status-badge';
 import { createServerApiClient, getApiBaseUrl } from '../src/lib/api';
 

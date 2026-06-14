@@ -1,6 +1,6 @@
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, type OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
-import { API_DOCS_PATH, API_GLOBAL_PREFIX } from '@b2b/shared';
+import { API_DOCS_PATH, API_GLOBAL_PREFIX } from '@b2b/contracts';
 import type { AppConfigService } from './common/config/app-config.service';
 import { APP_VERSION, SERVICE_NAME } from './app.constants';
 
