@@ -161,6 +161,73 @@ jobs:
       - name: API integration tests
         run: pnpm --filter @b2b/api test:integration
 
+  authentication:
+    name: Authentication (real PostgreSQL + Playwright E2E)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: b2b
+          POSTGRES_PASSWORD: b2b
+          POSTGRES_DB: b2b_auth_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U b2b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://b2b:b2b@localhost:5432/b2b_auth_test?schema=public
+      JWT_ACCESS_SECRET: ci-only-access-secret-at-least-32-characters-long
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:3001/api/v1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: PostgreSQL readiness
+        run: PGPASSWORD=b2b pg_isready -h localhost -U b2b -d b2b_auth_test
+
+      - name: Prisma generate
+        run: pnpm --filter @b2b/database db:generate
+
+      - name: Build
+        run: pnpm build
+
+      - name: Migrate deploy
+        run: pnpm --filter @b2b/database db:migrate:deploy
+
+      - name: Auth unit tests
+        run: pnpm --filter @b2b/api test:unit
+
+      # Fail-closed: real-PostgreSQL API integration + concurrency suites. Exits
+      # non-zero on an unreachable DB, zero collected tests, or any skipped test.
+      - name: Auth API + DB integration + concurrency (fail-closed gate)
+        run: pnpm --filter @b2b/api test:integration
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @b2b/web exec playwright install --with-deps chromium
+
+      # Web build must inline NEXT_PUBLIC_API_BASE_URL; rebuild it with the value.
+      - name: Build web with API base URL
+        run: pnpm --filter @b2b/web build
+
+      - name: E2E (Playwright, real browser → web → API → PostgreSQL)
+        run: pnpm --filter @b2b/web test:e2e
+
   compose:
     name: Docker Compose validation
     runs-on: ubuntu-latest
