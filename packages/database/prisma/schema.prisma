@@ -217,16 +217,22 @@ model SystemSetting {
 // ---------------------------------------------------------------------------
 
 model User {
-  id           BigInt     @id @default(autoincrement())
-  publicId     String     @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
-  email        String     @unique @db.Citext
-  passwordHash String     @map("password_hash")
-  fullName     String     @map("full_name")
-  status       UserStatus @default(INVITED)
-  lastLoginAt  DateTime?  @map("last_login_at") @db.Timestamptz(6)
-  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt    DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deletedAt    DateTime?  @map("deleted_at") @db.Timestamptz(6)
+  id                BigInt     @id @default(autoincrement())
+  publicId          String     @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  email             String     @unique @db.Citext
+  passwordHash      String     @map("password_hash")
+  fullName          String     @map("full_name")
+  status            UserStatus @default(INVITED)
+  // Account-security state (TASK-009 §11). `failedLoginCount`/`lockedUntil` are
+  // the authoritative, durable brute-force lockout (Redis is never the source of
+  // truth). `passwordChangedAt` supports "changed since" session policies.
+  failedLoginCount  Int        @default(0) @map("failed_login_count")
+  lockedUntil       DateTime?  @map("locked_until") @db.Timestamptz(6)
+  passwordChangedAt DateTime?  @map("password_changed_at") @db.Timestamptz(6)
+  lastLoginAt       DateTime?  @map("last_login_at") @db.Timestamptz(6)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt         DateTime?  @map("deleted_at") @db.Timestamptz(6)
 
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
@@ -261,32 +267,53 @@ model User {
 }
 
 model RefreshToken {
-  id        BigInt    @id @default(autoincrement())
-  userId    BigInt    @map("user_id")
-  tokenHash String    @unique @map("token_hash")
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
-  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
-  userAgent String?   @map("user_agent")
-  ip        String?   @db.Inet
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            BigInt    @id @default(autoincrement())
+  // Externally-addressable session id (used by GET/DELETE /auth/sessions); the
+  // sequential PK is never exposed (API_CONVENTIONS §7b / IDOR). NOT unique per
+  // row: every token in a rotation chain shares one stable session id.
+  sessionId     String    @default(dbgenerated("gen_random_uuid()")) @map("session_id") @db.Uuid
+  userId        BigInt    @map("user_id")
+  // SHA-256 digest of the opaque token. The plaintext token is NEVER stored.
+  tokenHash     String    @unique @map("token_hash")
+  // Rotation chain / theft-detection: every token in one login lineage shares a
+  // family id; a rotated token points to its successor via replacedById.
+  tokenFamilyId String    @map("token_family_id") @db.Uuid
+  replacedById  BigInt?   @map("replaced_by_token_id")
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revokeReason  String?   @map("revoke_reason")
+  lastUsedAt    DateTime? @map("last_used_at") @db.Timestamptz(6)
+  userAgent     String?   @map("user_agent")
+  ip            String?   @db.Inet
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy RefreshToken?  @relation("RefreshTokenReplacement", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces   RefreshToken[] @relation("RefreshTokenReplacement")
 
   @@index([userId])
+  @@index([sessionId])
+  @@index([tokenFamilyId])
+  // Active-session lookup / expiry cleanup.
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
   @@map("refresh_tokens")
 }
 
 model PasswordResetToken {
-  id        BigInt    @id @default(autoincrement())
-  userId    BigInt    @map("user_id")
-  tokenHash String    @unique @map("token_hash")
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
-  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            BigInt    @id @default(autoincrement())
+  userId        BigInt    @map("user_id")
+  // SHA-256 digest of the single-use reset token; plaintext is never stored.
+  tokenHash     String    @unique @map("token_hash")
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt    DateTime? @map("consumed_at") @db.Timestamptz(6)
+  requestedByIp String?   @map("requested_by_ip") @db.Inet
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
   @@map("password_reset_tokens")
 }
 
