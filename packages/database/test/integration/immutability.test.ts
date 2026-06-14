@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
-import { createPrisma, dbConfigured, makeOrder, makeUser } from './helpers';
+import { createPrisma, makeOrder, makeUser } from './helpers';
 
-describe.skipIf(!dbConfigured)('append-only immutability', () => {
+describe('append-only immutability', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {

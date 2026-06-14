@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
-import { createPrisma, dbConfigured } from './helpers';
+import { createPrisma } from './helpers';
 
 /**
  * Verifies the migration actually applied the hand-written DDL Prisma cannot
@@ -8,7 +8,7 @@ import { createPrisma, dbConfigured } from './helpers';
  * partial unique indexes). Assumes `prisma migrate deploy` has run against the
  * test database before this suite (CI orchestrates that).
  */
-describe.skipIf(!dbConfigured)('migration — applied database objects', () => {
+describe('migration — applied database objects', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {

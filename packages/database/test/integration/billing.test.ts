@@ -2,9 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
 import { withTransaction } from '../../src/transaction';
-import { createPrisma, dbConfigured, makeCustomer, makeInvoiceSeries, makeUser } from './helpers';
+import { createPrisma, makeCustomer, makeInvoiceSeries, makeUser } from './helpers';
 
-describe.skipIf(!dbConfigured)('billing — invoice series & numbering', () => {
+describe('billing — invoice series & numbering', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
-import { createPrisma, dbConfigured, uniqueSuffix } from './helpers';
+import { createPrisma, uniqueSuffix } from './helpers';
 
-describe.skipIf(!dbConfigured)('soft delete & partial unique', () => {
+describe('soft delete & partial unique', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {

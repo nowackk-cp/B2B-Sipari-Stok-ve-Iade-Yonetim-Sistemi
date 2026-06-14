@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
-import { createPrisma, dbConfigured, makeUser, uniqueSuffix } from './helpers';
+import { createPrisma, makeCompany, makeOutboxEvent, makeUser, uniqueSuffix } from './helpers';
 
-describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => {
+describe('platform — outbox / effects / imports', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {
@@ -41,22 +41,34 @@ describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => 
   });
 
   it('rejects a duplicate effect key (effect_type, effect_key)', async () => {
+    const outbox = await makeOutboxEvent(prisma);
     const effectKey = `EMAIL:${uniqueSuffix()}`;
     await prisma.effectReceipt.create({
-      data: { effectType: 'EMAIL', effectKey, providerIdempotencyKey: 'p1' },
+      data: {
+        outboxEventId: outbox.id,
+        effectType: 'EMAIL',
+        effectKey,
+        providerIdempotencyKey: 'p1',
+      },
     });
     await expect(
       prisma.effectReceipt.create({
-        data: { effectType: 'EMAIL', effectKey, providerIdempotencyKey: 'p2' },
+        data: {
+          outboxEventId: outbox.id,
+          effectType: 'EMAIL',
+          effectKey,
+          providerIdempotencyKey: 'p2',
+        },
       }),
     ).rejects.toThrow();
   });
 
   it('rejects an invalid effect status value (enum)', async () => {
+    const outbox = await makeOutboxEvent(prisma);
     await expect(
       prisma.$executeRawUnsafe(
-        `INSERT INTO effect_receipts (effect_type, effect_key, provider_idempotency_key, status, attempts, created_at, updated_at)
-         VALUES ('EMAIL', 'k_${Date.now()}', 'p', 'NOT_A_STATUS', 0, now(), now())`,
+        `INSERT INTO effect_receipts (outbox_event_id, effect_type, effect_key, provider_idempotency_key, status, attempts, created_at, updated_at)
+         VALUES (${outbox.id}, 'EMAIL', 'k_${Date.now()}', 'p', 'NOT_A_STATUS', 0, now(), now())`,
       ),
     ).rejects.toThrow();
   });
@@ -73,7 +85,7 @@ describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => 
   });
 
   async function makeFile() {
-    const user = await makeUser(prisma);
+    const [user, company] = await Promise.all([makeUser(prisma), makeCompany(prisma)]);
     const file = await prisma.file.create({
       data: {
         storageKey: `key/${uniqueSuffix()}`,
@@ -84,13 +96,14 @@ describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => 
         uploadedById: user.id,
       },
     });
-    return { file, user };
+    return { file, user, company };
   }
 
   it('rejects a duplicate import row idempotency key', async () => {
-    const { file, user } = await makeFile();
+    const { file, user, company } = await makeFile();
     const job = await prisma.importJob.create({
       data: {
+        companyId: company.id,
         type: 'PRODUCT',
         sourceFileId: file.id,
         fileChecksumSha256: `c_${uniqueSuffix()}`,
@@ -115,9 +128,10 @@ describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => 
   });
 
   it('rejects a duplicate (import_job, row_number)', async () => {
-    const { file, user } = await makeFile();
+    const { file, user, company } = await makeFile();
     const job = await prisma.importJob.create({
       data: {
+        companyId: company.id,
         type: 'PRODUCT',
         sourceFileId: file.id,
         fileChecksumSha256: `c_${uniqueSuffix()}`,
@@ -147,11 +161,11 @@ describe.skipIf(!dbConfigured)('platform — outbox / effects / imports', () => 
   });
 
   it('rejects an invalid import status value (enum)', async () => {
-    const { file, user } = await makeFile();
+    const { file, user, company } = await makeFile();
     await expect(
       prisma.$executeRawUnsafe(
-        `INSERT INTO import_jobs (type, source_file_id, file_checksum_sha256, status, apply_policy, total_rows, valid_rows, invalid_rows, applied_rows, created_by, created_at, updated_at)
-         VALUES ('PRODUCT', ${file.id}, 'c_${Date.now()}', 'BOGUS', 'ALL_OR_NOTHING', 0,0,0,0, ${user.id}, now(), now())`,
+        `INSERT INTO import_jobs (company_id, type, source_file_id, file_checksum_sha256, status, apply_policy, total_rows, valid_rows, invalid_rows, applied_rows, created_by, created_at, updated_at)
+         VALUES (${company.id}, 'PRODUCT', ${file.id}, 'c_${Date.now()}', 'BOGUS', 'ALL_OR_NOTHING', 0,0,0,0, ${user.id}, now(), now())`,
       ),
     ).rejects.toThrow();
   });

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
-import { createPrisma, dbConfigured, makeUser, makeWarehouse } from './helpers';
+import { createPrisma, makeUser, makeWarehouse } from './helpers';
 
-describe.skipIf(!dbConfigured)('RBAC persistence', () => {
+describe('RBAC persistence', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {

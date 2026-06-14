@@ -9,9 +9,9 @@ import {
 } from '@b2b/domain';
 import { resetDatabase } from '../../src/testing';
 import { seed } from '../../src/seed';
-import { createPrisma, dbConfigured } from './helpers';
+import { createPrisma } from './helpers';
 
-describe.skipIf(!dbConfigured)('seed (idempotent system seed)', () => {
+describe('seed (idempotent system seed)', () => {
   let prisma: PrismaClient;
 
   beforeAll(() => {
