@@ -21,7 +21,12 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}\"",
     "clean": "turbo run clean",
-    "gen:api-client": "pnpm --filter @b2b/api build && pnpm --filter @b2b/api openapi:json && pnpm --filter @b2b/api-client generate"
+    "gen:api-client": "pnpm --filter @b2b/api build && pnpm --filter @b2b/api openapi:json && pnpm --filter @b2b/api-client generate",
+    "check:docs": "node scripts/check-docs-links.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:no-skip": "node scripts/check-no-skipped-tests.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:openapi": "node scripts/check-openapi-drift.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.16.0",

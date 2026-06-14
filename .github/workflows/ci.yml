@@ -13,8 +13,8 @@ env:
   CI: 'true'
 
 jobs:
-  build-test:
-    name: Lint · Typecheck · Test · Build
+  quality:
+    name: Lint · Typecheck · Test · Build · Static gates
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -38,6 +38,27 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      - name: No focused/skipped tests
+        run: pnpm check:no-skip
+
+      - name: Secret scan
+        run: pnpm check:secrets
+
+      - name: Package boundary check
+        run: pnpm check:boundaries
+
+      - name: Docs link check
+        run: pnpm check:docs
+
+      - name: Prisma format check
+        run: pnpm --filter @b2b/database exec prisma format && git diff --exit-code -- packages/database/prisma/schema.prisma
+
+      - name: Prisma validate
+        run: pnpm --filter @b2b/database db:validate
+
+      - name: Prisma generate
+        run: pnpm --filter @b2b/database db:generate
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -47,23 +68,29 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: E2E smoke (no browser)
-        run: pnpm test:e2e
+      - name: OpenAPI / client generation + drift
+        run: pnpm check:openapi
 
-      # Extensible OpenAPI step: generates the spec from the API and the typed
-      # client. TASK-015 turns this into an enforced drift gate
-      # (regenerate + `git diff --exit-code`).
-      - name: OpenAPI generation (drift hook)
-        run: |
-          pnpm --filter @b2b/api openapi:json
-          pnpm --filter @b2b/api-client generate
-
-      - name: Docs link check
-        run: node scripts/check-docs-links.mjs
-
-  integration:
-    name: Integration (real services)
+  database:
+    name: Database (real PostgreSQL)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: b2b
+          POSTGRES_PASSWORD: b2b
+          POSTGRES_DB: b2b_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U b2b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://b2b:b2b@localhost:5432/b2b_test?schema=public
+      SHADOW_DATABASE_URL: postgresql://b2b:b2b@localhost:5432/b2b_shadow?schema=public
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,23 +107,44 @@ jobs:
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: Create shadow database (for drift gate)
+        run: PGPASSWORD=b2b psql -h localhost -U b2b -d b2b_test -c 'CREATE DATABASE b2b_shadow;'
+
       - name: Build
         run: pnpm build
 
-      - name: Start infrastructure
+      - name: Prisma generate
+        run: pnpm --filter @b2b/database db:generate
+
+      - name: Migrate deploy (empty database)
+        run: pnpm --filter @b2b/database db:migrate:deploy
+
+      - name: Migrate deploy again (idempotent — no pending migrations)
+        run: pnpm --filter @b2b/database db:migrate:deploy
+
+      - name: Schema/migration drift check
+        run: pnpm --filter @b2b/database db:drift
+
+      - name: Seed (first run)
+        run: pnpm --filter @b2b/database db:seed
+
+      - name: Seed again (idempotency)
+        run: pnpm --filter @b2b/database db:seed
+
+      - name: Database integration tests
+        run: pnpm --filter @b2b/database test:integration
+
+      - name: API integration tests
+        run: pnpm --filter @b2b/api test:integration
+
+  compose:
+    name: Docker Compose validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose config
         run: |
           cp .env.example .env
-          docker compose up -d
-
-      - name: Wait for services
-        run: bash scripts/wait-for-services.sh 120
-
-      - name: Infra connectivity smoke
-        run: node scripts/check-infra.mjs
-
-      - name: Integration tests
-        run: pnpm test:integration
-
-      - name: Tear down infrastructure
-        if: always()
-        run: docker compose down -v
+          docker compose config -q
