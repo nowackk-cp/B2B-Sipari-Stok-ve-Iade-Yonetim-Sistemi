@@ -23,6 +23,9 @@ const ENV_DEFAULTS: Record<string, string> = {
   S3_BUCKET: 'b2b-files',
   SMTP_HOST: 'localhost',
   SWAGGER_ENABLED: 'false',
+  // Spec generation reflects metadata only (no signing happens); a placeholder
+  // satisfies the >=32-char fail-fast check.
+  JWT_ACCESS_SECRET: 'openapi-placeholder-access-secret-32chars',
 };
 
 for (const [key, value] of Object.entries(ENV_DEFAULTS)) {

@@ -1,5 +1,6 @@
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, type OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 import { API_DOCS_PATH, API_GLOBAL_PREFIX } from '@b2b/contracts';
 import type { AppConfigService } from './common/config/app-config.service';
 import { APP_VERSION, SERVICE_NAME } from './app.constants';
@@ -14,6 +15,10 @@ import { APP_VERSION, SERVICE_NAME } from './app.constants';
  */
 export function configureApp(app: INestApplication, config: AppConfigService): void {
   app.setGlobalPrefix(API_GLOBAL_PREFIX);
+
+  // Parse the HttpOnly refresh cookie (auth flow). No secret/signing needed —
+  // the refresh token is itself a high-entropy opaque value stored hashed.
+  app.use(cookieParser());
 
   app.useGlobalPipes(
     new ValidationPipe({
