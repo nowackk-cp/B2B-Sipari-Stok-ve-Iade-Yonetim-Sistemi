@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start -p 3000",
     "typecheck": "tsc -p tsconfig.json",
-    "clean": "node -e \"['.next','.turbo','tsconfig.tsbuildinfo','next-env.d.ts'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
+    "test:e2e": "playwright test",
+    "clean": "node -e \"['.next','.turbo','tsconfig.tsbuildinfo','next-env.d.ts','playwright-report','test-results'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
   },
   "dependencies": {
     "@b2b/api-client": "workspace:*",
@@ -20,6 +21,7 @@
     "react-dom": "18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.49.1",
     "@types/node": "20.17.10",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
