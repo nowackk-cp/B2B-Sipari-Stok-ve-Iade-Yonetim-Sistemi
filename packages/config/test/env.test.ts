@@ -22,6 +22,7 @@ const validApiEnv = {
   API_PORT: '3001',
   API_CORS_ORIGINS: 'http://localhost:3000, http://localhost:3002',
   SWAGGER_ENABLED: 'true',
+  JWT_ACCESS_SECRET: 'test-only-access-secret-at-least-32-characters-long',
 } satisfies Record<string, string>;
 
 describe('config / api', () => {
@@ -34,6 +35,18 @@ describe('config / api', () => {
     expect(cfg.S3_FORCE_PATH_STYLE).toBe(true); // defaulted
     expect(cfg.S3_REGION).toBe('us-east-1'); // defaulted
     expect(cfg.API_CORS_ORIGINS).toEqual(['http://localhost:3000', 'http://localhost:3002']);
+    // Auth defaults.
+    expect(cfg.JWT_ACCESS_TTL_SECONDS).toBe(900);
+    expect(cfg.REFRESH_TOKEN_TTL_DAYS).toBe(30);
+    expect(cfg.ARGON2_MEMORY_KIB).toBe(19456);
+    expect(cfg.AUTH_LOCKOUT_THRESHOLD).toBe(5);
+    expect(cfg.REFRESH_COOKIE_PATH).toBe('/api/v1/auth');
+  });
+
+  it('rejects a JWT signing secret shorter than 32 characters (fail-fast)', () => {
+    expect(() => loadApiConfig({ ...validApiEnv, JWT_ACCESS_SECRET: 'too-short' })).toThrowError(
+      EnvValidationError,
+    );
   });
 
   it('fails fast when a required variable is missing', () => {

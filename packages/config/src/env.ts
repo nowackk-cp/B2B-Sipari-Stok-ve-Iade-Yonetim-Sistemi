@@ -85,6 +85,51 @@ export const apiEnvSchema = z.object({
   SWAGGER_ENABLED: booleanFromString.default(true),
 });
 
+// --- Group: auth (identity / token / account-security) -----------------------
+// Centralizes every tunable that governs authentication so the policy lives in
+// one validated place (CLAUDE.md §config). Secrets are never committed; see
+// .env.example. The JWT signing secret length is enforced fail-fast so a weak
+// HS256 key cannot reach production.
+const JWT_MIN_SECRET_LENGTH = 32;
+export const authEnvSchema = z.object({
+  // Access token (short-lived JWT). HS256 this milestone, behind a signer
+  // adapter so a move to RS256 asymmetric keys is a binding swap only.
+  JWT_ACCESS_SECRET: z
+    .string()
+    .min(
+      JWT_MIN_SECRET_LENGTH,
+      `JWT_ACCESS_SECRET must be at least ${JWT_MIN_SECRET_LENGTH} chars`,
+    ),
+  JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(900),
+  JWT_ISSUER: z.string().min(1).default('b2b-operations-suite'),
+  JWT_AUDIENCE: z.string().min(1).default('b2b-api'),
+
+  // Refresh token (opaque, rotating). Only the SHA-256 digest is persisted.
+  REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().max(365).default(30),
+
+  // argon2id parameters (OWASP-aligned defaults). Tunable for the host.
+  ARGON2_MEMORY_KIB: z.coerce.number().int().min(8192).max(1048576).default(19456),
+  ARGON2_ITERATIONS: z.coerce.number().int().min(2).max(20).default(3),
+  ARGON2_PARALLELISM: z.coerce.number().int().min(1).max(16).default(1),
+
+  // Password reset token lifetime (single-use, digest-only).
+  PASSWORD_RESET_TTL_MINUTES: z.coerce.number().int().positive().max(1440).default(30),
+
+  // Durable per-account lockout (authoritative in PostgreSQL, not Redis).
+  AUTH_LOCKOUT_THRESHOLD: z.coerce.number().int().positive().max(100).default(5),
+  AUTH_LOCKOUT_DURATION_MINUTES: z.coerce.number().int().positive().max(1440).default(15),
+
+  // Redis-backed login throttle (secondary defense; per IP and per identifier).
+  LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().positive().max(1000).default(10),
+  LOGIN_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().max(3600).default(300),
+
+  // Refresh cookie (web transport). Secure defaults to true in production.
+  COOKIE_SECURE: booleanFromString.optional(),
+  COOKIE_DOMAIN: z.string().min(1).optional(),
+  REFRESH_COOKIE_PATH: z.string().min(1).default('/api/v1/auth'),
+  REFRESH_COOKIE_NAME: z.string().min(1).default('b2b_refresh_token'),
+});
+
 // --- Group: worker -----------------------------------------------------------
 export const workerEnvSchema = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().positive().max(1000).default(5),
@@ -103,7 +148,8 @@ export const apiConfigSchema = commonEnvSchema
   .merge(redisEnvSchema)
   .merge(storageEnvSchema)
   .merge(mailEnvSchema)
-  .merge(apiEnvSchema);
+  .merge(apiEnvSchema)
+  .merge(authEnvSchema);
 
 export const workerConfigSchema = commonEnvSchema
   .merge(postgresEnvSchema)
