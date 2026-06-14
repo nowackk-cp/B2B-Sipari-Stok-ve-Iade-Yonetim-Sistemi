@@ -199,6 +199,7 @@ model Company {
 
   invoiceSeries InvoiceSeries[]
   invoices      Invoice[]
+  importJobs    ImportJob[]
 
   @@map("companies")
 }
@@ -566,7 +567,7 @@ model StockTransferItem {
   productId  BigInt @map("product_id")
   quantity   BigInt
 
-  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
   product  Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
 
   @@unique([transferId, productId])
@@ -583,7 +584,7 @@ model TransferStatusHistory {
   reason      String?
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  transfer  StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  transfer  StockTransfer @relation(fields: [transferId], references: [id], onDelete: Restrict)
   changedBy User          @relation("TransferStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
 
   @@index([transferId])
@@ -719,7 +720,7 @@ model OrderStatusHistory {
   reason      String?
   createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  order     Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order     Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
   changedBy User  @relation("OrderStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
 
   @@index([orderId])
@@ -739,8 +740,8 @@ model OrderPriceOverride {
   actorUserId           BigInt   @map("actor_user_id")
   createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  order      Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  orderItem  OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  order      Order     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  orderItem  OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
   actor      User      @relation("OrderPriceOverrideActor", fields: [actorUserId], references: [id], onDelete: Restrict)
   approvedBy User?     @relation("OrderPriceOverrideApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
 
@@ -802,7 +803,7 @@ model ReturnItem {
   restock     Boolean         @default(false)
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  return    Return    @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  return    Return    @relation(fields: [returnId], references: [id], onDelete: Restrict)
   orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
   product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
 
@@ -820,7 +821,7 @@ model ReturnStatusHistory {
   reason      String?
   createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  return    Return @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  return    Return @relation(fields: [returnId], references: [id], onDelete: Restrict)
   changedBy User   @relation("ReturnStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
 
   @@index([returnId])
@@ -904,7 +905,7 @@ model InvoiceItem {
   lineTaxAmount      BigInt  @map("line_tax_amount")
   lineTotalAmount    BigInt  @map("line_total_amount")
 
-  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
   product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([invoiceId])
@@ -920,7 +921,7 @@ model InvoiceStatusHistory {
   reason      String?
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
   changedBy User    @relation("InvoiceStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
 
   @@index([invoiceId])
@@ -962,7 +963,7 @@ model QuoteItem {
   taxRateBp       Int     @map("tax_rate_bp")
   lineTotalAmount BigInt  @map("line_total_amount")
 
-  quote   Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quote   Quote    @relation(fields: [quoteId], references: [id], onDelete: Restrict)
   product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([quoteId])
@@ -1007,9 +1008,10 @@ model File {
 
   uploadedBy User @relation("FileUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
 
-  importJobsSource ImportJob[] @relation("ImportJobSourceFile")
-  importJobsResult ImportJob[] @relation("ImportJobResultFile")
+  importJobsSource ImportJob[]     @relation("ImportJobSourceFile")
+  importJobsResult ImportJob[]     @relation("ImportJobResultFile")
   exportJobs       ExportJob[]
+  effectReceipts   EffectReceipt[] @relation("EffectReceiptOutputFile")
 
   @@index([entityType, entityId])
   @@index([uploadedById])
@@ -1022,6 +1024,7 @@ model File {
 
 model ImportJob {
   id                 BigInt       @id @default(autoincrement())
+  companyId          BigInt       @map("company_id")
   type               String
   sourceFileId       BigInt       @map("source_file_id")
   fileChecksumSha256 String       @map("file_checksum_sha256")
@@ -1032,18 +1035,31 @@ model ImportJob {
   invalidRows        Int          @default(0) @map("invalid_rows")
   appliedRows        Int          @default(0) @map("applied_rows")
   resultFileId       BigInt?      @map("result_file_id")
+  // Crash-recovery / replay (A-09): a terminal import can be retried as a new
+  // attempt linked to the original via replayOfImportId. Lease + heartbeat let
+  // a worker reclaim a job whose previous owner died mid-import.
+  replayOfImportId   BigInt?      @map("replay_of_import_id")
+  attemptNumber      Int          @default(1) @map("attempt_number")
+  resumedFromRow     Int?         @map("resumed_from_row")
+  leaseExpiresAt     DateTime?    @map("lease_expires_at") @db.Timestamptz(6)
+  heartbeatAt        DateTime?    @map("heartbeat_at") @db.Timestamptz(6)
   createdById        BigInt       @map("created_by")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  sourceFile File  @relation("ImportJobSourceFile", fields: [sourceFileId], references: [id], onDelete: Restrict)
-  resultFile File? @relation("ImportJobResultFile", fields: [resultFileId], references: [id], onDelete: SetNull)
-  createdBy  User  @relation("ImportJobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  company    Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  sourceFile File        @relation("ImportJobSourceFile", fields: [sourceFileId], references: [id], onDelete: Restrict)
+  resultFile File?       @relation("ImportJobResultFile", fields: [resultFileId], references: [id], onDelete: SetNull)
+  createdBy  User        @relation("ImportJobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  replayOf   ImportJob?  @relation("ImportJobReplay", fields: [replayOfImportId], references: [id], onDelete: Restrict)
+  replays    ImportJob[] @relation("ImportJobReplay")
 
   rows   ImportRow[]
   errors ImportJobError[]
 
   @@index([status])
+  @@index([companyId])
+  @@index([replayOfImportId])
   @@index([type, fileChecksumSha256])
   @@map("import_jobs")
 }
@@ -1060,7 +1076,7 @@ model ImportRow {
   warehouseId    BigInt?         @map("warehouse_id")
   errorMessage   String?         @map("error_message")
 
-  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Restrict)
 
   @@unique([importJobId, rowNumber])
   @@index([importJobId, status])
@@ -1077,7 +1093,7 @@ model ImportJobError {
   rawData     Json     @map("raw_data") @db.JsonB
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Restrict)
 
   @@index([importJobId])
   @@map("import_job_errors")
@@ -1120,6 +1136,11 @@ model OutboxEvent {
   lastError        String?      @map("last_error")
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  // One outbox event may spawn several side effects (email + pdf + …); the
+  // relation is one-to-many. Receipts are RESTRICT-bound so an event whose
+  // effects exist can never be deleted (auditability — DATABASE_DESIGN §14).
+  effects EffectReceipt[]
+
   @@index([status, availableAt])
   @@index([aggregateType, aggregateId])
   @@map("outbox_events")
@@ -1127,6 +1148,7 @@ model OutboxEvent {
 
 model EffectReceipt {
   id                     BigInt       @id @default(autoincrement())
+  outboxEventId          BigInt       @map("outbox_event_id")
   effectType             String       @map("effect_type")
   effectKey              String       @map("effect_key")
   providerIdempotencyKey String       @map("provider_idempotency_key")
@@ -1135,10 +1157,18 @@ model EffectReceipt {
   outputFileId           BigInt?      @map("output_file_id")
   attempts               Int          @default(0)
   lastError              String?      @map("last_error")
+  completedAt            DateTime?    @map("completed_at") @db.Timestamptz(6)
   createdAt              DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt              DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  outboxEvent OutboxEvent @relation(fields: [outboxEventId], references: [id], onDelete: Restrict)
+  outputFile  File?       @relation("EffectReceiptOutputFile", fields: [outputFileId], references: [id], onDelete: SetNull)
+
+  // effect_key dedupes the *effect*; (effect_type, provider_idempotency_key)
+  // dedupes the *provider call* within its provider scope (ADR-008).
   @@unique([effectType, effectKey])
+  @@unique([effectType, providerIdempotencyKey])
+  @@index([outboxEventId])
   @@index([status])
   @@map("effect_receipts")
 }

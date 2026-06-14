@@ -394,6 +394,7 @@ CREATE TYPE effect_status      AS ENUM ('PLANNED','IN_PROGRESS','SUCCEEDED','FAI
 | Kolon | Tip | Notlar |
 |-------|-----|--------|
 | id | BIGINT PK | |
+| company_id | FK→companies NOT NULL `ON DELETE RESTRICT` | duplicate politikası ve kapsam için tenant |
 | type | TEXT | 'PRODUCT'/'CUSTOMER'/'STOCK_ADJUSTMENT' |
 | source_file_id | FK→files | |
 | file_checksum_sha256 | TEXT NOT NULL | **dosya parmak izi** (replay protection) |
@@ -401,10 +402,16 @@ CREATE TYPE effect_status      AS ENUM ('PLANNED','IN_PROGRESS','SUCCEEDED','FAI
 | apply_policy | TEXT NOT NULL DEFAULT 'ALL_OR_NOTHING' | 'ALL_OR_NOTHING' / 'ROW_LEVEL' |
 | total_rows / valid_rows / invalid_rows / applied_rows | INT | |
 | result_file_id | FK→files NULL | hata raporu dosyası |
+| replay_of_import_id | FK→import_jobs NULL `ON DELETE RESTRICT` | terminal import'un yeniden denemesi bu kayda bağlanır |
+| attempt_number | INT NOT NULL DEFAULT 1 | replay denemesi sayacı |
+| resumed_from_row | INT NULL | crash sonrası devam edilen satır |
+| lease_expires_at | TIMESTAMPTZ NULL | worker lease süresi (sahibi ölürse devralma) |
+| heartbeat_at | TIMESTAMPTZ NULL | aktif worker sinyali |
 | created_by | FK | |
 | created_at / updated_at | | |
-- **Duplicate file policy:** `UNIQUE (company_id?, type, file_checksum_sha256)` aktif/processing job'lar için (partial) → aynı dosyanın ikinci yüklemesi `409 CONFLICT` veya mevcut job'a yönlendirir (no-op).
+- **Duplicate file policy (canonical):** `UNIQUE (company_id, file_checksum_sha256)` **partial**, yalnız aktif durumlar (`UPLOADED, VALIDATING, VALIDATED, IMPORTING`) için → aynı company+checksum ile ikinci aktif yükleme `409 CONFLICT`. Terminal durumlar (`COMPLETED, VALIDATION_FAILED, IMPORT_FAILED, CANCELLED`) hariç; terminal sonrası yeniden deneme `replay_of_import_id` ile bağlı ayrı bir attempt olarak oluşur. Satır tekrarını `import_rows.idempotency_key UNIQUE` engeller.
 - **Durum makinesi:** `UPLOADED → VALIDATING → VALIDATED → IMPORTING → COMPLETED`; hata dalları `VALIDATION_FAILED`, `IMPORT_FAILED`; `CANCELLED`. Geçişler idempotent ve crash sonrası resume edilebilir (mevcut duruma göre).
+- **Silme:** `prevent_delete()` trigger'ı; child (`import_rows`, `import_job_errors`) FK'leri RESTRICT (cascade yok).
 
 ### `import_rows` (staging — satır-seviyesi durum)
 | Kolon | Tip | Notlar |
@@ -461,16 +468,20 @@ CREATE TYPE effect_status      AS ENUM ('PLANNED','IN_PROGRESS','SUCCEEDED','FAI
 | Kolon | Tip | Notlar |
 |-------|-----|--------|
 | id | BIGINT PK | |
+| outbox_event_id | FK→outbox_events NOT NULL | etkiyi doğuran outbox olayı; **`ON DELETE RESTRICT`** (cascade yok). Bir event birden çok effect doğurabilir → one-to-many. |
 | effect_type | TEXT NOT NULL | 'EMAIL'/'PDF'/'EXPORT'/'NOTIFICATION' |
 | effect_key | TEXT NOT NULL | deterministik effect anahtarı (örn. `EMAIL:invoice.issued:{invoiceId}`) |
 | provider_idempotency_key | TEXT NOT NULL | dış servise gönderilen idempotency anahtarı (**zorunlu**) |
 | status | effect_status NOT NULL DEFAULT 'PLANNED' | PLANNED → IN_PROGRESS → SUCCEEDED/FAILED/UNKNOWN |
 | provider_message_id | TEXT NULL | sağlayıcı yanıtı (SUCCEEDED'da set) |
-| output_file_id | FK→files NULL | PDF/export çıktısı |
+| output_file_id | FK→files NULL `ON DELETE SET NULL` | PDF/export çıktısı |
 | attempts | INT NOT NULL DEFAULT 0 | |
 | last_error | TEXT NULL | |
+| completed_at | TIMESTAMPTZ NULL | SUCCEEDED anında set; CHECK ile zorlanır |
 | created_at / updated_at | TIMESTAMPTZ | |
-- **Unique:** `UNIQUE (effect_type, effect_key)`.
+- **Unique:** `UNIQUE (effect_type, effect_key)` (effect dedup) **ve** `UNIQUE (effect_type, provider_idempotency_key)` (provider-çağrı dedup, provider scope = effect_type).
+- **CHECK:** `status='SUCCEEDED' ⇒ completed_at IS NOT NULL` ve `status='PLANNED' ⇒ completed_at IS NULL` (crash-state tutarlılığı). Geçersiz `status` zaten enum ile reddedilir.
+- **Silme:** transaction kaydı — `prevent_delete()` trigger'ı hard delete'i engeller; `output_file_id` dışındaki referanslar RESTRICT.
 - **Crash-safe akış (G-17 — receipt önce "başarılı" işaretlenemez):**
   1. Worker dış çağrıdan **önce** receipt'i `PLANNED`/`IN_PROGRESS` olarak yazar (`INSERT ... ON CONFLICT (effect_type, effect_key) DO NOTHING`; conflict varsa mevcut kaydı `FOR UPDATE` okur).
   2. Dış servis çağrısı **`provider_idempotency_key` ile** yapılır.
@@ -537,23 +548,35 @@ CREATE TYPE effect_status      AS ENUM ('PLANNED','IN_PROGRESS','SUCCEEDED','FAI
 
 ## 17. Immutable Tablolar ve Enforcement {#10}
 
-**Immutable (append-only):** `stock_ledger`, `order_status_history`, `order_price_overrides`, `audit_logs`, `payments`, `import_job_errors`.
+**Append-only (UPDATE+DELETE yasak):** `stock_ledger`, `order_status_history`, `transfer_status_history`, `return_status_history`, `invoice_status_history`, `order_price_overrides`, `audit_logs`, `payments`, `import_job_errors`.
+
+**Transaction aggregate parent (hard DELETE yasak, status UPDATE serbest):** `orders`, `stock_transfers`, `returns`, `invoices`, `quotes`, `import_jobs`, `export_jobs`, `outbox_events`, `effect_receipts`, `stock_reservations`, `job_logs`. Ayrıca soft-delete master `users` hard delete edilemez (actor geçmişini korur — `deleted_at` ile pasifleştirilir).
 
 Enforcement (defense in depth):
-1. **Uygulama:** repository bu tablolara yalnızca `create` sağlar; `update`/`delete` metodu yok.
-2. **DB trigger:**
+1. **Uygulama:** repository bu tablolara yalnızca `create` (+ append-only olmayanlarda status `update`) sağlar; `delete` metodu yok.
+2. **DB trigger'ları** — iki ayrı fonksiyon, `SET search_path = pg_catalog, public` ile hardened (DBF-007):
 ```sql
-CREATE OR REPLACE FUNCTION prevent_mutation() RETURNS trigger AS $$
+-- Append-only: hem UPDATE hem DELETE bloke.
+CREATE OR REPLACE FUNCTION prevent_mutation() RETURNS trigger
+  LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 BEGIN
-  RAISE EXCEPTION 'Table % is append-only', TG_TABLE_NAME;
-END $$ LANGUAGE plpgsql;
+  RAISE EXCEPTION 'append_only_violation: table % is append-only (% blocked)', TG_TABLE_NAME, TG_OP
+    USING ERRCODE = 'restrict_violation';
+END $$;
 
-CREATE TRIGGER no_update_delete_stock_ledger
-  BEFORE UPDATE OR DELETE ON stock_ledger
-  FOR EACH ROW EXECUTE FUNCTION prevent_mutation();
--- aynısı: order_status_history, audit_logs, payments
+-- Transaction parent: yalnız DELETE bloke (status UPDATE serbest).
+CREATE OR REPLACE FUNCTION prevent_delete() RETURNS trigger
+  LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+BEGIN
+  RAISE EXCEPTION 'delete_forbidden: table % is a transaction/immutable record and cannot be hard-deleted', TG_TABLE_NAME
+    USING ERRCODE = 'restrict_violation';
+END $$;
+-- no_mutation_* → append-only tablolar; no_delete_* → transaction parent + users.
 ```
-3. **Yetki:** uygulama DB rolüne bu tablolarda yalnızca `INSERT, SELECT` grant edilir (prod).
+3. **FK politikası (DBF-003):** transaction parent→child kenarlarında **`ON DELETE CASCADE` kullanılmaz**; tümü `RESTRICT`/`NO ACTION`. Böylece numara almış fatura, payment, status history, ledger, price override hiçbir FK zinciriyle silinemez. Actor FK'leri (orders.created_by vb.) RESTRICT; salt-gözlem actor alanları (audit_logs.actor_id, stock_ledger.created_by) `SET NULL`.
+4. **Yetki:** uygulama DB rolüne append-only tablolarda yalnızca `INSERT, SELECT` grant edilir (prod).
+
+> **PK konvansiyonu (DBF-010):** Surrogate PK'ler Prisma `@default(autoincrement())` ile `BIGSERIAL` olarak üretilir. Bu, yasal gapless fatura numarası için **değildir** (o `invoice_series` kilitli sayaç ile; ADR-006). Prisma-yönetimli surrogate anahtarlar için `BIGSERIAL` kabul edilmiştir; `BIGINT GENERATED ALWAYS AS IDENTITY` ile fonksiyonel fark domain doğruluğunu etkilemez.
 
 ---
 

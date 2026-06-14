@@ -16,7 +16,7 @@
 - Dispatcher claim/lease: `... WHERE status='PENDING' AND available_at<=now() ORDER BY id FOR UPDATE SKIP LOCKED LIMIT N` → eşzamanlı worker'lar aynı satırı işlemez.
 
 ### `effect_receipts` (worker yan-etki idempotency'si — **state modeli, G-17 güncellemesi**)
-`(effect_type, effect_key) UNIQUE`, **`status effect_status` (PLANNED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN)**, **`provider_idempotency_key` (zorunlu)**, `provider_message_id`, `output_file_id`, `attempts`.
+`outbox_event_id` (FK→outbox_events NOT NULL, **`ON DELETE RESTRICT`**; bir event birden çok effect doğurabilir → one-to-many), `(effect_type, effect_key) UNIQUE`, **`(effect_type, provider_idempotency_key) UNIQUE`** (provider-çağrı dedup), **`status effect_status` (PLANNED/IN_PROGRESS/SUCCEEDED/FAILED/UNKNOWN)**, **`provider_idempotency_key` (zorunlu)**, `provider_message_id`, `output_file_id` (FK→files, `ON DELETE SET NULL`), `completed_at` (CHECK: `SUCCEEDED ⇒ NOT NULL`, `PLANNED ⇒ NULL`), `attempts`. Hard delete `prevent_delete()` ile engellenir.
 
 > **Önceki tasarımın açığı (Codex G-17):** "dış çağrıdan önce receipt INSERT ON CONFLICT DO NOTHING, conflict → tekrar yapma" yaklaşımı çift etkiyi engelliyordu ama **receipt insert sonrası, external call öncesi crash olursa etkiyi atlayabiliyordu** (lost effect). Çözüm: receipt'in **status alanı** olur ve **external call yapılmadan önce "başarılı" işaretlenemez**.
 
