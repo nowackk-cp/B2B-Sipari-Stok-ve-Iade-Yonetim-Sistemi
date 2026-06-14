@@ -2,7 +2,7 @@
   "name": "@b2b/database",
   "version": "0.0.0",
   "private": true,
-  "description": "Prisma database package skeleton (schema, migrations, seed). Domain schema lands in TASK-004.",
+  "description": "Prisma database package: schema, migrations, client lifecycle, transaction helper and idempotent system seed.",
   "type": "commonjs",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     }
   },
   "files": [
@@ -19,24 +23,30 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
+    "db:format": "prisma format",
+    "db:validate": "prisma validate",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
-    "db:seed": "tsx src/seed.ts",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:drift": "node scripts/check-drift.mjs",
     "db:studio": "prisma studio",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "clean": "node -e \"['dist','.turbo','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
   },
   "prisma": {
-    "schema": "prisma/schema.prisma"
+    "schema": "prisma/schema.prisma",
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@b2b/domain": "workspace:*",
     "@b2b/logger": "workspace:*",
     "@prisma/client": "5.22.0"
   },
   "devDependencies": {
     "prisma": "5.22.0",
     "tsx": "4.19.2",
-    "typescript": "5.6.3"
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
   }
 }

@@ -1,14 +1,19 @@
 // B2B Operations Suite — Prisma schema.
 //
-// FOUNDATION MILESTONE (1A): this schema intentionally contains NO domain
-// models. It declares only the datasource and generator so the package, its
-// scripts and migration directory are ready. The full domain schema
-// (identity / authz / scope / catalog / warehouses / customers, then stock /
-// orders / billing) is implemented in TASK-004 and later tasks per
-// docs/architecture/DATABASE_DESIGN.md.
+// Authority: docs/architecture/DATABASE_DESIGN.md. This schema implements the
+// full persistence model (identity, RBAC, scope, catalog, inventory, orders,
+// returns, billing, imports, outbox/effects, audit). Conventions:
+//   - PK: BigInt identity (sequential, index-friendly). Externally-addressable
+//     aggregates additionally expose a `publicId UUID` to avoid leaking
+//     sequential ids over the public API (SECURITY_MODEL IDOR / §4).
+//   - Time: every timestamp is `timestamptz` (UTC). created/updated_at standard.
+//   - Money: BigInt minor unit + CHAR(3) ISO currency. Tax/discount = basis pts.
+//   - Soft delete: `deletedAt` only on the master-data tables listed in §16.
 //
-// CHECK constraints, append-only triggers and partial-unique indexes are added
-// via hand-written SQL inside Prisma migrations (see DATABASE_DESIGN.md).
+// CHECK constraints, append-only triggers, updated_at triggers, partial-unique
+// indexes and extensions (citext / pg_trgm / pgcrypto) are NOT expressible in
+// Prisma and are applied via hand-written SQL appended to the generated
+// migration (see prisma/migrations + DATABASE_DESIGN.md §17/§22).
 
 generator client {
   provider = "prisma-client-js"
@@ -17,4 +22,1217 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums (DATABASE_DESIGN §0) — PostgreSQL native enums.
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  INVITED
+
+  @@map("user_status")
+}
+
+enum OrderStatus {
+  DRAFT
+  APPROVED
+  PREPARING
+  SHIPPED
+  CANCELLED
+
+  @@map("order_status")
+}
+
+enum ReservationStatus {
+  ACTIVE
+  RELEASED
+  CONSUMED
+
+  @@map("reservation_status")
+}
+
+enum LedgerChangeType {
+  RECEIPT
+  SHIPMENT
+  TRANSFER_OUT
+  TRANSFER_IN
+  RETURN_IN
+  ADJUSTMENT
+
+  @@map("ledger_change_type")
+}
+
+enum TransferStatus {
+  DRAFT
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+
+  @@map("transfer_status")
+}
+
+enum ReturnStatus {
+  DRAFT
+  APPROVED
+  RECEIVED
+  REJECTED
+  COMPLETED
+
+  @@map("return_status")
+}
+
+enum ReturnCondition {
+  RESELLABLE
+  DAMAGED
+
+  @@map("return_condition")
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  VOID
+
+  @@map("invoice_status")
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+
+  @@map("quote_status")
+}
+
+enum DocumentType {
+  INVOICE
+  CREDIT_NOTE
+
+  @@map("document_type")
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+
+  @@map("job_status")
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+
+  @@map("email_status")
+}
+
+enum AddressType {
+  BILLING
+  SHIPPING
+
+  @@map("address_type")
+}
+
+enum ImportStatus {
+  UPLOADED
+  VALIDATING
+  VALIDATED
+  IMPORTING
+  COMPLETED
+  VALIDATION_FAILED
+  IMPORT_FAILED
+  CANCELLED
+
+  @@map("import_status")
+}
+
+enum ImportRowStatus {
+  PENDING
+  VALID
+  INVALID
+  APPLIED
+  SKIPPED
+
+  @@map("import_row_status")
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD
+
+  @@map("outbox_status")
+}
+
+enum EffectStatus {
+  PLANNED
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED
+  UNKNOWN
+
+  @@map("effect_status")
+}
+
+// ---------------------------------------------------------------------------
+// Organisation / system
+// ---------------------------------------------------------------------------
+
+model Company {
+  id              BigInt   @id @default(autoincrement())
+  name            String
+  legalName       String?  @map("legal_name")
+  taxNumber       String?  @map("tax_number")
+  defaultCurrency String   @default("TRY") @map("default_currency") @db.Char(3)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  invoiceSeries InvoiceSeries[]
+  invoices      Invoice[]
+
+  @@map("companies")
+}
+
+model SystemSetting {
+  key       String   @id
+  value     Json     @db.JsonB
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("system_settings")
+}
+
+// ---------------------------------------------------------------------------
+// M1 Identity & Auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id           BigInt     @id @default(autoincrement())
+  publicId     String     @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  email        String     @unique @db.Citext
+  passwordHash String     @map("password_hash")
+  fullName     String     @map("full_name")
+  status       UserStatus @default(INVITED)
+  lastLoginAt  DateTime?  @map("last_login_at") @db.Timestamptz(6)
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt    DateTime?  @map("deleted_at") @db.Timestamptz(6)
+
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  roles               UserRole[]           @relation("UserRoleUser")
+  rolesAssigned       UserRole[]           @relation("UserRoleAssignedBy")
+  warehouseScopes     UserWarehouseScope[] @relation("UserWarehouseScopeUser")
+  scopesGranted       UserWarehouseScope[] @relation("UserWarehouseScopeGrantedBy")
+  permissionGrants    RolePermission[]     @relation("RolePermissionGrantedBy")
+  notifications       Notification[]
+
+  ordersCreated          Order[]                 @relation("OrderCreatedBy")
+  ordersApproved         Order[]                 @relation("OrderApprovedBy")
+  orderStatusChanges     OrderStatusHistory[]    @relation("OrderStatusHistoryChangedBy")
+  priceOverridesActor    OrderPriceOverride[]    @relation("OrderPriceOverrideActor")
+  priceOverridesApprover OrderPriceOverride[]    @relation("OrderPriceOverrideApprovedBy")
+  ledgerEntries          StockLedger[]           @relation("StockLedgerCreatedBy")
+  transfersCreated       StockTransfer[]         @relation("StockTransferCreatedBy")
+  transferStatusChanges  TransferStatusHistory[] @relation("TransferStatusHistoryChangedBy")
+  returnsCreated         Return[]                @relation("ReturnCreatedBy")
+  returnStatusChanges    ReturnStatusHistory[]   @relation("ReturnStatusHistoryChangedBy")
+  invoicesCreated        Invoice[]               @relation("InvoiceCreatedBy")
+  invoiceStatusChanges   InvoiceStatusHistory[]  @relation("InvoiceStatusHistoryChangedBy")
+  quotesCreated          Quote[]                 @relation("QuoteCreatedBy")
+  paymentsRecorded       Payment[]               @relation("PaymentCreatedBy")
+  filesUploaded          File[]                  @relation("FileUploadedBy")
+  importJobsCreated      ImportJob[]             @relation("ImportJobCreatedBy")
+  exportJobsCreated      ExportJob[]             @relation("ExportJobCreatedBy")
+  auditLogs              AuditLog[]              @relation("AuditLogActor")
+
+  @@index([status])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        BigInt    @id @default(autoincrement())
+  userId    BigInt    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  userAgent String?   @map("user_agent")
+  ip        String?   @db.Inet
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        BigInt    @id @default(autoincrement())
+  userId    BigInt    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// M2 Authorization
+// ---------------------------------------------------------------------------
+
+model Role {
+  id             BigInt   @id @default(autoincrement())
+  name           String   @unique
+  description    String?
+  isSystem       Boolean  @default(false) @map("is_system")
+  isProtected    Boolean  @default(false) @map("is_protected")
+  privilegeLevel Int      @default(0) @map("privilege_level")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id              BigInt   @id @default(autoincrement())
+  code            String   @unique
+  module          String
+  permissionGroup String   @map("permission_group")
+  description     String?
+  isProtected     Boolean  @default(false) @map("is_protected")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  roles RolePermission[]
+
+  @@index([permissionGroup])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       BigInt   @map("role_id")
+  permissionId BigInt   @map("permission_id")
+  grantedById  BigInt?  @map("granted_by")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  grantedBy  User?      @relation("RolePermissionGrantedBy", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId       BigInt   @map("user_id")
+  roleId       BigInt   @map("role_id")
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  assignedById BigInt?  @map("assigned_by")
+
+  user       User  @relation("UserRoleUser", fields: [userId], references: [id], onDelete: Cascade)
+  role       Role  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  assignedBy User? @relation("UserRoleAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// M3 Scope
+// ---------------------------------------------------------------------------
+
+model UserWarehouseScope {
+  userId      BigInt   @map("user_id")
+  warehouseId BigInt   @map("warehouse_id")
+  scopeType   String   @default("EXPLICIT") @map("scope_type")
+  grantedById BigInt   @map("granted_by")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user      User      @relation("UserWarehouseScopeUser", fields: [userId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  grantedBy User      @relation("UserWarehouseScopeGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+
+  @@id([userId, warehouseId])
+  @@index([warehouseId])
+  @@map("user_warehouse_scopes")
+}
+
+// ---------------------------------------------------------------------------
+// M4 Catalog
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        BigInt    @id @default(autoincrement())
+  name      String
+  parentId  BigInt?   @map("parent_id")
+  slug      String?
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  parent   Category?  @relation("CategoryParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryParent")
+  products Product[]
+
+  @@unique([slug])
+  @@index([parentId])
+  @@map("categories")
+}
+
+model Product {
+  id              BigInt    @id @default(autoincrement())
+  publicId        String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  sku             String
+  name            String
+  categoryId      BigInt?   @map("category_id")
+  barcode         String?
+  unit            String    @default("EACH")
+  listPriceAmount BigInt    @default(0) @map("list_price_amount")
+  currency        String    @default("TRY") @db.Char(3)
+  taxRateBp       Int       @default(2000) @map("tax_rate_bp")
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  orderItems         OrderItem[]
+  stockBalances      StockBalance[]
+  stockLedgerEntries StockLedger[]
+  reservations       StockReservation[]
+  transferItems      StockTransferItem[]
+  returnItems        ReturnItem[]
+  invoiceItems       InvoiceItem[]
+  quoteItems         QuoteItem[]
+
+  @@unique([sku])
+  @@index([categoryId])
+  @@index([isActive])
+  @@index([barcode])
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@map("products")
+}
+
+// ---------------------------------------------------------------------------
+// M5 Warehouses
+// ---------------------------------------------------------------------------
+
+model Warehouse {
+  id           BigInt    @id @default(autoincrement())
+  publicId     String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  code         String
+  name         String
+  addressLine1 String?   @map("address_line1")
+  addressLine2 String?   @map("address_line2")
+  city         String?
+  postalCode   String?   @map("postal_code")
+  country      String?   @db.Char(2)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  stockBalances      StockBalance[]
+  stockLedgerEntries StockLedger[]
+  reservations       StockReservation[]
+  scopes             UserWarehouseScope[]
+  transfersOut       StockTransfer[]      @relation("TransferSource")
+  transfersIn        StockTransfer[]      @relation("TransferDest")
+  orders             Order[]
+
+  @@unique([code])
+  @@map("warehouses")
+}
+
+// ---------------------------------------------------------------------------
+// M6 Inventory
+// ---------------------------------------------------------------------------
+
+model StockBalance {
+  id          BigInt   @id @default(autoincrement())
+  productId   BigInt   @map("product_id")
+  warehouseId BigInt   @map("warehouse_id")
+  onHand      BigInt   @default(0) @map("on_hand")
+  reserved    BigInt   @default(0)
+  version     Int      @default(0)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, warehouseId])
+  @@index([warehouseId])
+  @@map("stock_balances")
+}
+
+model StockLedger {
+  id              BigInt           @id @default(autoincrement())
+  productId       BigInt           @map("product_id")
+  warehouseId     BigInt           @map("warehouse_id")
+  changeType      LedgerChangeType @map("change_type")
+  quantity        BigInt
+  balanceAfter    BigInt           @map("balance_after")
+  referenceType   String           @map("reference_type")
+  referenceId     BigInt?          @map("reference_id")
+  referenceLineId BigInt?          @map("reference_line_id")
+  idempotencyKey  String           @unique @map("idempotency_key")
+  reason          String?
+  createdById     BigInt?          @map("created_by")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  createdBy User?     @relation("StockLedgerCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([productId, warehouseId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("stock_ledger")
+}
+
+model StockReservation {
+  id             BigInt            @id @default(autoincrement())
+  orderId        BigInt            @map("order_id")
+  orderItemId    BigInt            @map("order_item_id")
+  productId      BigInt            @map("product_id")
+  warehouseId    BigInt            @map("warehouse_id")
+  quantity       BigInt
+  status         ReservationStatus @default(ACTIVE)
+  idempotencyKey String            @unique @map("idempotency_key")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  releasedAt     DateTime?         @map("released_at") @db.Timestamptz(6)
+  consumedAt     DateTime?         @map("consumed_at") @db.Timestamptz(6)
+
+  order     Order     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, orderItemId])
+  @@index([orderId])
+  @@index([productId, warehouseId, status])
+  @@map("stock_reservations")
+}
+
+// ---------------------------------------------------------------------------
+// M7 Transfers
+// ---------------------------------------------------------------------------
+
+model StockTransfer {
+  id                BigInt         @id @default(autoincrement())
+  publicId          String         @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  transferNo        String         @unique @map("transfer_no")
+  sourceWarehouseId BigInt         @map("source_warehouse_id")
+  destWarehouseId   BigInt         @map("dest_warehouse_id")
+  status            TransferStatus @default(DRAFT)
+  createdById       BigInt         @map("created_by")
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime?      @map("completed_at") @db.Timestamptz(6)
+
+  sourceWarehouse Warehouse @relation("TransferSource", fields: [sourceWarehouseId], references: [id], onDelete: Restrict)
+  destWarehouse   Warehouse @relation("TransferDest", fields: [destWarehouseId], references: [id], onDelete: Restrict)
+  createdBy       User      @relation("StockTransferCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  items         StockTransferItem[]
+  statusHistory TransferStatusHistory[]
+
+  @@index([status])
+  @@index([sourceWarehouseId])
+  @@index([destWarehouseId])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id         BigInt @id @default(autoincrement())
+  transferId BigInt @map("transfer_id")
+  productId  BigInt @map("product_id")
+  quantity   BigInt
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product  Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([transferId, productId])
+  @@index([productId])
+  @@map("stock_transfer_items")
+}
+
+model TransferStatusHistory {
+  id          BigInt          @id @default(autoincrement())
+  transferId  BigInt          @map("transfer_id")
+  fromStatus  TransferStatus? @map("from_status")
+  toStatus    TransferStatus  @map("to_status")
+  changedById BigInt          @map("changed_by")
+  reason      String?
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  transfer  StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  changedBy User          @relation("TransferStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([transferId])
+  @@map("transfer_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// M8 Customers
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id        BigInt    @id @default(autoincrement())
+  publicId  String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  code      String
+  name      String
+  taxNumber String?   @map("tax_number")
+  email     String?   @db.Citext
+  phone     String?
+  type      String    @default("COMPANY")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  addresses CustomerAddress[]
+  orders    Order[]
+  returns   Return[]
+  invoices  Invoice[]
+  quotes    Quote[]
+
+  @@unique([code])
+  @@index([taxNumber])
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@map("customers")
+}
+
+model CustomerAddress {
+  id         BigInt      @id @default(autoincrement())
+  customerId BigInt      @map("customer_id")
+  type       AddressType
+  line1      String
+  line2      String?
+  city       String?
+  state      String?
+  postalCode String?     @map("postal_code")
+  country    String?     @db.Char(2)
+  isDefault  Boolean     @default(false) @map("is_default")
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt  DateTime?   @map("deleted_at") @db.Timestamptz(6)
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, type])
+  @@map("customer_addresses")
+}
+
+// ---------------------------------------------------------------------------
+// M9 Orders (immutable record)
+// ---------------------------------------------------------------------------
+
+model Order {
+  id               BigInt      @id @default(autoincrement())
+  publicId         String      @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  orderNo          String      @unique @map("order_no")
+  customerId       BigInt      @map("customer_id")
+  warehouseId      BigInt      @map("warehouse_id")
+  status           OrderStatus @default(DRAFT)
+  currency         String      @default("TRY") @db.Char(3)
+  subtotalAmount   BigInt      @default(0) @map("subtotal_amount")
+  taxAmount        BigInt      @default(0) @map("tax_amount")
+  grandTotalAmount BigInt      @default(0) @map("grand_total_amount")
+  notes            String?
+  createdById      BigInt      @map("created_by")
+  approvedById     BigInt?     @map("approved_by")
+  approvedAt       DateTime?   @map("approved_at") @db.Timestamptz(6)
+  shippedAt        DateTime?   @map("shipped_at") @db.Timestamptz(6)
+  cancelledAt      DateTime?   @map("cancelled_at") @db.Timestamptz(6)
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  warehouse  Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  createdBy  User      @relation("OrderCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy User?     @relation("OrderApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  items          OrderItem[]
+  statusHistory  OrderStatusHistory[]
+  priceOverrides OrderPriceOverride[]
+  reservations   StockReservation[]
+  invoices       Invoice[]
+  returns        Return[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([warehouseId, status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                 BigInt   @id @default(autoincrement())
+  orderId            BigInt   @map("order_id")
+  productId          BigInt   @map("product_id")
+  productSku         String   @map("product_sku")
+  productName        String   @map("product_name")
+  quantity           BigInt
+  listPriceAmount    BigInt   @map("list_price_amount")
+  unitPriceAmount    BigInt   @map("unit_price_amount")
+  taxRateBp          Int      @map("tax_rate_bp")
+  priceOverridden    Boolean  @default(false) @map("price_overridden")
+  lineSubtotalAmount BigInt   @map("line_subtotal_amount")
+  lineTaxAmount      BigInt   @map("line_tax_amount")
+  lineTotalAmount    BigInt   @map("line_total_amount")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  order          Order                @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  product        Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  reservations   StockReservation[]
+  priceOverrides OrderPriceOverride[]
+  returnItems    ReturnItem[]
+
+  @@unique([orderId, productId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id          BigInt       @id @default(autoincrement())
+  orderId     BigInt       @map("order_id")
+  fromStatus  OrderStatus? @map("from_status")
+  toStatus    OrderStatus  @map("to_status")
+  changedById BigInt       @map("changed_by")
+  reason      String?
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  order     Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  changedBy User  @relation("OrderStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@map("order_status_history")
+}
+
+model OrderPriceOverride {
+  id                    BigInt   @id @default(autoincrement())
+  orderId               BigInt   @map("order_id")
+  orderItemId           BigInt   @map("order_item_id")
+  originalPriceAmount   BigInt   @map("original_price_amount")
+  overriddenPriceAmount BigInt   @map("overridden_price_amount")
+  discountPctBp         Int      @map("discount_pct_bp")
+  reason                String
+  requiresApproval      Boolean  @default(false) @map("requires_approval")
+  approvedById          BigInt?  @map("approved_by")
+  actorUserId           BigInt   @map("actor_user_id")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  order      Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem  OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  actor      User      @relation("OrderPriceOverrideActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  approvedBy User?     @relation("OrderPriceOverrideApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([orderItemId])
+  @@map("order_price_overrides")
+}
+
+model CommandIdempotency {
+  key         String   @id
+  commandType String   @map("command_type")
+  aggregateId BigInt   @map("aggregate_id")
+  requestHash String   @map("request_hash")
+  status      String
+  response    Json?    @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@unique([commandType, aggregateId, key])
+  @@map("command_idempotency")
+}
+
+// ---------------------------------------------------------------------------
+// M10 Returns
+// ---------------------------------------------------------------------------
+
+model Return {
+  id          BigInt       @id @default(autoincrement())
+  publicId    String       @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  returnNo    String       @unique @map("return_no")
+  orderId     BigInt       @map("order_id")
+  customerId  BigInt       @map("customer_id")
+  status      ReturnStatus @default(DRAFT)
+  reason      String?
+  createdById BigInt       @map("created_by")
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  receivedAt  DateTime?    @map("received_at") @db.Timestamptz(6)
+
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdBy User     @relation("ReturnCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  items         ReturnItem[]
+  statusHistory ReturnStatusHistory[]
+
+  @@index([orderId])
+  @@index([status])
+  @@map("returns")
+}
+
+model ReturnItem {
+  id          BigInt          @id @default(autoincrement())
+  returnId    BigInt          @map("return_id")
+  orderItemId BigInt          @map("order_item_id")
+  productId   BigInt          @map("product_id")
+  quantity    BigInt
+  condition   ReturnCondition
+  restock     Boolean         @default(false)
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  return    Return    @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([returnId])
+  @@index([orderItemId])
+  @@map("return_items")
+}
+
+model ReturnStatusHistory {
+  id          BigInt        @id @default(autoincrement())
+  returnId    BigInt        @map("return_id")
+  fromStatus  ReturnStatus? @map("from_status")
+  toStatus    ReturnStatus  @map("to_status")
+  changedById BigInt        @map("changed_by")
+  reason      String?
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  return    Return @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  changedBy User   @relation("ReturnStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([returnId])
+  @@map("return_status_history")
+}
+
+// ---------------------------------------------------------------------------
+// M11 Billing
+// ---------------------------------------------------------------------------
+
+model InvoiceSeries {
+  id         BigInt   @id @default(autoincrement())
+  companyId  BigInt   @map("company_id")
+  seriesCode String   @map("series_code")
+  fiscalYear Int      @map("fiscal_year")
+  prefix     String
+  nextNumber BigInt   @default(1) @map("next_number")
+  version    Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  invoices Invoice[]
+
+  @@unique([companyId, seriesCode, fiscalYear])
+  @@map("invoice_series")
+}
+
+model Invoice {
+  id               BigInt        @id @default(autoincrement())
+  publicId         String        @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  seriesId         BigInt?       @map("series_id")
+  invoiceNumber    BigInt?       @map("invoice_number")
+  invoiceNo        String?       @map("invoice_no")
+  docType          DocumentType  @default(INVOICE) @map("doc_type")
+  companyId        BigInt        @map("company_id")
+  fiscalYear       Int?          @map("fiscal_year")
+  customerId       BigInt        @map("customer_id")
+  orderId          BigInt?       @map("order_id")
+  status           InvoiceStatus @default(DRAFT)
+  currency         String        @default("TRY") @db.Char(3)
+  subtotalAmount   BigInt        @default(0) @map("subtotal_amount")
+  taxAmount        BigInt        @default(0) @map("tax_amount")
+  grandTotalAmount BigInt        @default(0) @map("grand_total_amount")
+  issuedAt         DateTime?     @map("issued_at") @db.Timestamptz(6)
+  dueDate          DateTime?     @map("due_date") @db.Date
+  paidAt           DateTime?     @map("paid_at") @db.Timestamptz(6)
+  createdById      BigInt        @map("created_by")
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  company   Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  series    InvoiceSeries? @relation(fields: [seriesId], references: [id], onDelete: Restrict)
+  customer  Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  order     Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  createdBy User           @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  items         InvoiceItem[]
+  payments      Payment[]
+  statusHistory InvoiceStatusHistory[]
+
+  // A-01: gapless invoice numbering uniqueness. NULL invoice_number rows
+  // (DRAFT) do not collide under PostgreSQL NULLS DISTINCT semantics.
+  @@unique([companyId, seriesId, fiscalYear, invoiceNumber])
+  @@index([customerId])
+  @@index([status])
+  @@index([orderId])
+  @@index([issuedAt])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id                 BigInt  @id @default(autoincrement())
+  invoiceId          BigInt  @map("invoice_id")
+  productId          BigInt? @map("product_id")
+  description        String
+  quantity           BigInt
+  unitPriceAmount    BigInt  @map("unit_price_amount")
+  taxRateBp          Int     @map("tax_rate_bp")
+  lineSubtotalAmount BigInt  @map("line_subtotal_amount")
+  lineTaxAmount      BigInt  @map("line_tax_amount")
+  lineTotalAmount    BigInt  @map("line_total_amount")
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+model InvoiceStatusHistory {
+  id          BigInt         @id @default(autoincrement())
+  invoiceId   BigInt         @map("invoice_id")
+  fromStatus  InvoiceStatus? @map("from_status")
+  toStatus    InvoiceStatus  @map("to_status")
+  changedById BigInt         @map("changed_by")
+  reason      String?
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  changedBy User    @relation("InvoiceStatusHistoryChangedBy", fields: [changedById], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+  @@map("invoice_status_history")
+}
+
+model Quote {
+  id               BigInt      @id @default(autoincrement())
+  publicId         String      @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  quoteNo          String      @unique @map("quote_no")
+  customerId       BigInt      @map("customer_id")
+  status           QuoteStatus @default(DRAFT)
+  currency         String      @default("TRY") @db.Char(3)
+  subtotalAmount   BigInt      @default(0) @map("subtotal_amount")
+  taxAmount        BigInt      @default(0) @map("tax_amount")
+  grandTotalAmount BigInt      @default(0) @map("grand_total_amount")
+  validUntil       DateTime?   @map("valid_until") @db.Date
+  createdById      BigInt      @map("created_by")
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdBy User     @relation("QuoteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  items QuoteItem[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("quotes")
+}
+
+model QuoteItem {
+  id              BigInt  @id @default(autoincrement())
+  quoteId         BigInt  @map("quote_id")
+  productId       BigInt? @map("product_id")
+  description     String
+  quantity        BigInt
+  unitPriceAmount BigInt  @map("unit_price_amount")
+  taxRateBp       Int     @map("tax_rate_bp")
+  lineTotalAmount BigInt  @map("line_total_amount")
+
+  quote   Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([quoteId])
+  @@map("quote_items")
+}
+
+model Payment {
+  id          BigInt   @id @default(autoincrement())
+  invoiceId   BigInt   @map("invoice_id")
+  amount      BigInt
+  currency    String   @default("TRY") @db.Char(3)
+  method      String
+  paidAt      DateTime @map("paid_at") @db.Timestamptz(6)
+  createdById BigInt   @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  createdBy User    @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+// ---------------------------------------------------------------------------
+// M12 Files
+// ---------------------------------------------------------------------------
+
+model File {
+  id             BigInt    @id @default(autoincrement())
+  publicId       String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  storageKey     String    @unique @map("storage_key")
+  bucket         String
+  filename       String
+  contentType    String    @map("content_type")
+  sizeBytes      BigInt    @map("size_bytes")
+  checksumSha256 String?   @map("checksum_sha256")
+  entityType     String?   @map("entity_type")
+  entityId       BigInt?   @map("entity_id")
+  uploadedById   BigInt    @map("uploaded_by")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  uploadedBy User @relation("FileUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  importJobsSource ImportJob[] @relation("ImportJobSourceFile")
+  importJobsResult ImportJob[] @relation("ImportJobResultFile")
+  exportJobs       ExportJob[]
+
+  @@index([entityType, entityId])
+  @@index([uploadedById])
+  @@map("files")
+}
+
+// ---------------------------------------------------------------------------
+// M14/M15 Imports / Exports
+// ---------------------------------------------------------------------------
+
+model ImportJob {
+  id                 BigInt       @id @default(autoincrement())
+  type               String
+  sourceFileId       BigInt       @map("source_file_id")
+  fileChecksumSha256 String       @map("file_checksum_sha256")
+  status             ImportStatus @default(UPLOADED)
+  applyPolicy        String       @default("ALL_OR_NOTHING") @map("apply_policy")
+  totalRows          Int          @default(0) @map("total_rows")
+  validRows          Int          @default(0) @map("valid_rows")
+  invalidRows        Int          @default(0) @map("invalid_rows")
+  appliedRows        Int          @default(0) @map("applied_rows")
+  resultFileId       BigInt?      @map("result_file_id")
+  createdById        BigInt       @map("created_by")
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sourceFile File  @relation("ImportJobSourceFile", fields: [sourceFileId], references: [id], onDelete: Restrict)
+  resultFile File? @relation("ImportJobResultFile", fields: [resultFileId], references: [id], onDelete: SetNull)
+  createdBy  User  @relation("ImportJobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  rows   ImportRow[]
+  errors ImportJobError[]
+
+  @@index([status])
+  @@index([type, fileChecksumSha256])
+  @@map("import_jobs")
+}
+
+model ImportRow {
+  id             BigInt          @id @default(autoincrement())
+  importJobId    BigInt          @map("import_job_id")
+  rowNumber      Int             @map("row_number")
+  rowHash        String          @map("row_hash")
+  idempotencyKey String          @unique @map("idempotency_key")
+  rawData        Json            @map("raw_data") @db.JsonB
+  parsedData     Json?           @map("parsed_data") @db.JsonB
+  status         ImportRowStatus @default(PENDING)
+  warehouseId    BigInt?         @map("warehouse_id")
+  errorMessage   String?         @map("error_message")
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@unique([importJobId, rowNumber])
+  @@index([importJobId, status])
+  @@map("import_rows")
+}
+
+model ImportJobError {
+  id          BigInt   @id @default(autoincrement())
+  importJobId BigInt   @map("import_job_id")
+  importRowId BigInt?  @map("import_row_id")
+  rowNumber   Int      @map("row_number")
+  column      String?
+  message     String
+  rawData     Json     @map("raw_data") @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([importJobId])
+  @@map("import_job_errors")
+}
+
+model ExportJob {
+  id          BigInt    @id @default(autoincrement())
+  type        String
+  format      String
+  params      Json      @db.JsonB
+  status      JobStatus @default(PENDING)
+  fileId      BigInt?   @map("file_id")
+  createdById BigInt    @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  file      File? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  createdBy User  @relation("ExportJobCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status])
+  @@map("export_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// M16/M17 Outbox / Effects / Notifications / Email
+// ---------------------------------------------------------------------------
+
+model OutboxEvent {
+  id               BigInt       @id @default(autoincrement())
+  eventType        String       @map("event_type")
+  aggregateType    String       @map("aggregate_type")
+  aggregateId      BigInt       @map("aggregate_id")
+  deduplicationKey String       @unique @map("deduplication_key")
+  payload          Json         @db.JsonB
+  status           OutboxStatus @default(PENDING)
+  attempts         Int          @default(0)
+  availableAt      DateTime     @default(now()) @map("available_at") @db.Timestamptz(6)
+  lockedAt         DateTime?    @map("locked_at") @db.Timestamptz(6)
+  processedAt      DateTime?    @map("processed_at") @db.Timestamptz(6)
+  lastError        String?      @map("last_error")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([status, availableAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}
+
+model EffectReceipt {
+  id                     BigInt       @id @default(autoincrement())
+  effectType             String       @map("effect_type")
+  effectKey              String       @map("effect_key")
+  providerIdempotencyKey String       @map("provider_idempotency_key")
+  status                 EffectStatus @default(PLANNED)
+  providerMessageId      String?      @map("provider_message_id")
+  outputFileId           BigInt?      @map("output_file_id")
+  attempts               Int          @default(0)
+  lastError              String?      @map("last_error")
+  createdAt              DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([effectType, effectKey])
+  @@index([status])
+  @@map("effect_receipts")
+}
+
+model Notification {
+  id        BigInt    @id @default(autoincrement())
+  userId    BigInt    @map("user_id")
+  type      String
+  title     String
+  body      String?
+  data      Json?     @db.JsonB
+  dedupKey  String    @map("dedup_key")
+  readAt    DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupKey])
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model EmailMessage {
+  id                BigInt      @id @default(autoincrement())
+  toEmail           String      @map("to_email")
+  subject           String
+  template          String
+  payload           Json        @db.JsonB
+  idempotencyKey    String      @unique @map("idempotency_key")
+  status            EmailStatus @default(QUEUED)
+  providerMessageId String?     @map("provider_message_id")
+  error             String?
+  attempts          Int         @default(0)
+  sentAt            DateTime?   @map("sent_at") @db.Timestamptz(6)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, createdAt])
+  @@map("email_messages")
+}
+
+// ---------------------------------------------------------------------------
+// M18/M20 Audit & system
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id                 BigInt   @id @default(autoincrement())
+  actorId            BigInt?  @map("actor_id")
+  actorEmail         String?  @map("actor_email")
+  actorName          String?  @map("actor_name")
+  actorRolesSnapshot Json?    @map("actor_roles_snapshot") @db.JsonB
+  action             String
+  entityType         String?  @map("entity_type")
+  entityId           BigInt?  @map("entity_id")
+  before             Json?    @db.JsonB
+  after              Json?    @db.JsonB
+  ip                 String?  @db.Inet
+  userAgent          String?  @map("user_agent")
+  requestId          String?  @map("request_id")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  actor User? @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([requestId])
+  @@map("audit_logs")
+}
+
+model JobLog {
+  id         BigInt    @id @default(autoincrement())
+  queue      String
+  jobId      String    @map("job_id")
+  name       String
+  status     JobStatus @default(PENDING)
+  attempts   Int       @default(0)
+  error      String?
+  startedAt  DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([queue, status])
+  @@index([jobId])
+  @@map("job_logs")
+}
+
+model IdempotencyKey {
+  key         String   @id
+  requestHash String   @map("request_hash")
+  response    Json?    @db.JsonB
+  status      String
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@map("idempotency_keys")
 }
