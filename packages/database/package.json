@@ -30,8 +30,12 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "db:drift": "node scripts/check-drift.mjs",
+    "db:verify-catalog": "node scripts/verify-catalog.mjs",
     "db:studio": "prisma studio",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration:db": "node scripts/db-test-gate.mjs",
+    "test:database-gate": "node scripts/db-test-gate.mjs --gate",
+    "test": "node scripts/db-test-gate.mjs --allow-local-skip",
     "clean": "node -e \"['dist','.turbo','tsconfig.build.tsbuildinfo','tsconfig.tsbuildinfo'].forEach(p=>require('fs').rmSync(p,{recursive:true,force:true}))\""
   },
   "prisma": {

@@ -2,7 +2,14 @@
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
   "globalEnv": ["NODE_ENV"],
-  "globalPassThroughEnv": ["CI"],
+  "globalPassThroughEnv": [
+    "CI",
+    "DATABASE_URL",
+    "SHADOW_DATABASE_URL",
+    "ALLOW_DB_TEST_SKIP",
+    "CI_SKIP_DB_TESTS",
+    "ALLOW_NONTEST_DB"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -13,13 +20,15 @@
       "outputs": ["*.tsbuildinfo"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "test:unit": {
       "dependsOn": ["^build"]
     },
     "test:integration": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "test:e2e": {
       "dependsOn": ["^build"],

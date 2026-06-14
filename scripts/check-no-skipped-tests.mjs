@@ -8,6 +8,11 @@ const TEST_FILE = /\.(test|spec)\.[cm]?tsx?$/;
 const PATTERNS = [
   /\b(describe|it|test|context|suite)\.only\b/,
   /\b(describe|it|test|context|suite)\.skip\b/,
+  // Conditional skipping (skipIf/runIf) can silently disable a whole suite —
+  // e.g. a DB suite that self-skips when no database is configured. That is a
+  // fake-pass and is banned in required test paths (DBF-002).
+  /\b(describe|it|test|context|suite)\.skipIf\b/,
+  /\b(describe|it|test|context|suite)\.runIf\b/,
   /\b(beforeEach|afterEach|beforeAll|afterAll)\.skip\b/,
   /\bxit\b/,
   /\bxdescribe\b/,
