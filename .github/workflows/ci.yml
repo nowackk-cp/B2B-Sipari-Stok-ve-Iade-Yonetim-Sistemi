@@ -111,14 +111,23 @@ jobs:
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: PostgreSQL readiness
+        run: PGPASSWORD=b2b pg_isready -h localhost -U b2b -d b2b_test
+
       - name: Create shadow database (for drift gate)
         run: PGPASSWORD=b2b psql -h localhost -U b2b -d b2b_test -c 'CREATE DATABASE b2b_shadow;'
 
-      - name: Build
-        run: pnpm build
+      - name: Prisma format check
+        run: pnpm --filter @b2b/database exec prisma format && git diff --exit-code -- packages/database/prisma/schema.prisma
+
+      - name: Prisma validate
+        run: pnpm --filter @b2b/database db:validate
 
       - name: Prisma generate
         run: pnpm --filter @b2b/database db:generate
+
+      - name: Build
+        run: pnpm build
 
       - name: Migrate deploy (empty database)
         run: pnpm --filter @b2b/database db:migrate:deploy
@@ -135,8 +144,19 @@ jobs:
       - name: Seed again (idempotency)
         run: pnpm --filter @b2b/database db:seed
 
-      - name: Database integration tests
-        run: pnpm --filter @b2b/database test:integration
+      # Fail-closed database gate: this command exits non-zero if the database is
+      # unreachable, if zero DB tests are collected, or if any DB test is skipped
+      # — and it rejects skip-bypass env vars in CI. It runs the full real-Postgres
+      # integration suite (immutable/cascade, customer default address, import
+      # duplicate policy, effect-receipt FK & state, drift/catalog probes).
+      - name: Database integration tests (fail-closed gate)
+        run: pnpm --filter @b2b/database test:integration:db
+
+      - name: Schema catalog verification
+        run: pnpm --filter @b2b/database db:verify-catalog
+
+      - name: Assert no skipped DB tests / conditional skips
+        run: pnpm check:no-skip
 
       - name: API integration tests
         run: pnpm --filter @b2b/api test:integration
