@@ -12,10 +12,29 @@ import {
   type PermissionSubject,
 } from '../../src/modules/authorization/permission.service';
 import { PermissionGuard } from '../../src/modules/authorization/guards/permission.guard';
+import { APP_GUARD } from '@nestjs/core';
+import { AppModule } from '../../src/app.module';
+import { JwtAuthGuard } from '../../src/modules/auth/guards/jwt-auth.guard';
 import { TestAuthzController } from '../support/test-authz.controller';
 
-// NestJS stores @UseGuards on the handler under this metadata key.
+// NestJS stores @UseGuards on the handler under this metadata key, and @Module
+// providers under this one.
 const GUARDS_METADATA = '__guards__';
+const PROVIDERS_METADATA = 'providers';
+
+interface ClassProvider {
+  provide?: unknown;
+  useClass?: unknown;
+}
+
+/** APP_GUARD provider classes declared on a module, in declaration order. */
+function appGuardClasses(moduleClass: object): unknown[] {
+  const providers = (Reflect.getMetadata(PROVIDERS_METADATA, moduleClass) ?? []) as unknown[];
+  return providers
+    .filter((p): p is ClassProvider => typeof p === 'object' && p !== null)
+    .filter((p) => p.provide === APP_GUARD)
+    .map((p) => p.useClass);
+}
 
 /** Minimal fake repository so the service test needs no database. */
 class FakeRepo {
@@ -183,6 +202,26 @@ describe('route ↔ permission metadata coverage', () => {
     expect(offenders).not.toContain('singlePermissionRoute');
     expect(offenders).not.toContain('multiplePermissionRoute');
     expect(offenders).not.toContain('systemRoute');
+  });
+});
+
+describe('global guard registration (production AppModule)', () => {
+  it('binds PermissionGuard as an APP_GUARD exactly once', () => {
+    const guards = appGuardClasses(AppModule);
+    expect(guards.filter((g) => g === PermissionGuard)).toHaveLength(1);
+  });
+
+  it('runs authentication before authorization (JwtAuthGuard ordered first)', () => {
+    const guards = appGuardClasses(AppModule);
+    const authIndex = guards.indexOf(JwtAuthGuard);
+    const permIndex = guards.indexOf(PermissionGuard);
+    expect(authIndex).toBeGreaterThanOrEqual(0);
+    expect(permIndex).toBeGreaterThan(authIndex);
+  });
+
+  it('does not register JwtAuthGuard as a global guard more than once', () => {
+    const guards = appGuardClasses(AppModule);
+    expect(guards.filter((g) => g === JwtAuthGuard)).toHaveLength(1);
   });
 });
 

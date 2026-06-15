@@ -2,9 +2,12 @@ import { Controller, Get, Res } from '@nestjs/common';
 import { ApiOkResponse, ApiServiceUnavailableResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import type { HealthStatus } from '@b2b/contracts';
+import { Public } from '../../common/auth/public.decorator';
 import { HealthStatusDto } from './health.dto';
 import { HealthService } from './health.service';
 
+// Liveness/readiness probes must be reachable without authentication.
+@Public()
 @ApiTags('health')
 @Controller('health')
 export class HealthController {

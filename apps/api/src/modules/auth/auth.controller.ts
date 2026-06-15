@@ -15,6 +15,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import type { AuthSessionView, MessageView, SessionView, UserProfileView } from '@b2b/contracts';
 import { AppConfigService } from '../../common/config/app-config.service';
+import { Public } from '../../common/auth/public.decorator';
 import { requestMeta } from '../../common/http/request-meta';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { AuthPrincipal } from '../../common/auth/principal';
@@ -39,6 +40,7 @@ export class AuthController {
   ) {}
 
   @Post('login')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate with email + password.' })
   async login(
@@ -52,6 +54,7 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rotate the refresh token and issue a new access token.' })
   async refresh(
@@ -66,6 +69,7 @@ export class AuthController {
   }
 
   @Post('logout')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Revoke the current session and clear the refresh cookie.' })
   async logout(
@@ -143,6 +147,7 @@ export class AuthController {
   }
 
   @Post('forgot-password')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Request a password reset link (always a generic response).' })
   async forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request): Promise<MessageView> {
@@ -151,6 +156,7 @@ export class AuthController {
   }
 
   @Post('reset-password')
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Complete a password reset with a single-use token.' })
   async resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request): Promise<MessageView> {

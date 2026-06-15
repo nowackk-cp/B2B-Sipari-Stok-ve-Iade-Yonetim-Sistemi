@@ -1,6 +1,7 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { CurrentUser } from '../../src/modules/auth/decorators/current-user.decorator';
 import type { AuthPrincipal } from '../../src/common/auth/principal';
+import { Public } from '../../src/common/auth/public.decorator';
 import { JwtAuthGuard } from '../../src/modules/auth/guards/jwt-auth.guard';
 import { PermissionGuard } from '../../src/modules/authorization/guards/permission.guard';
 import { RequirePermissions } from '../../src/modules/authorization/decorators/require-permissions.decorator';
@@ -22,6 +23,7 @@ import { RequirePermissions } from '../../src/modules/authorization/decorators/r
 @Controller('test-authz')
 export class TestAuthzController {
   @Get('public')
+  @Public()
   publicRoute(): { ok: true; route: 'public' } {
     return { ok: true, route: 'public' };
   }

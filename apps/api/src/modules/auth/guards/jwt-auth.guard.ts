@@ -5,8 +5,10 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { type AuthPrincipal, PRINCIPAL_KEY } from '../../../common/auth/principal';
+import { IS_PUBLIC_KEY } from '../../../common/auth/public.decorator';
 import { CLOCK, type Clock } from '../../../common/time/clock';
 import { UserRepository } from '../../identity/user.repository';
 import { SessionService } from '../../sessions/session.service';
@@ -22,7 +24,10 @@ import { type AccessTokenSigner, InvalidAccessTokenError } from '../ports/access
  * even while its short-lived token would otherwise validate. On success a
  * minimal {@link AuthPrincipal} is attached to the request.
  *
- * It performs NO permission/role/scope decisions; those guards arrive later.
+ * Bound globally (APP_GUARD) ahead of {@link PermissionGuard}, so it runs first
+ * and the principal is present before any authorization check. Routes that must
+ * stay open (login, refresh, logout, forgot/reset-password, health) opt out with
+ * `@Public()`. It performs NO permission/role/scope decisions.
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -31,9 +36,16 @@ export class JwtAuthGuard implements CanActivate {
     private readonly users: UserRepository,
     private readonly sessions: SessionService,
     @Inject(CLOCK) private readonly clock: Clock,
+    private readonly reflector: Reflector,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+
     const req = context.switchToHttp().getRequest<Request>();
     const token = extractBearer(req.headers.authorization);
     if (!token) throw new UnauthorizedException('Missing bearer token');

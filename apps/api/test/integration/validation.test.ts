@@ -5,19 +5,22 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../../src/app.module';
 import { AppConfigService } from '../../src/common/config/app-config.service';
+import { Public } from '../../src/common/auth/public.decorator';
 import { configureApp } from '../../src/bootstrap';
 
 /**
  * Test-only DTO + controller. These exist ONLY inside this integration test so
  * the global ValidationPipe (whitelist + forbidNonWhitelisted) and the RFC 7807
  * filter can be exercised against a real request without adding any probe
- * endpoint to the production module surface.
+ * endpoint to the production module surface. Marked `@Public()` so the global
+ * authentication guard does not require a token before the pipe/filter run.
  */
 class ProbeDto {
   @IsString()
   name!: string;
 }
 
+@Public()
 @Controller()
 class ValidationProbeController {
   @Post('validation-probe')
