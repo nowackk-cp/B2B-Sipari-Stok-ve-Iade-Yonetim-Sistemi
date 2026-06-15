@@ -4,6 +4,8 @@ import { PasswordResetRepository } from './password-reset.repository';
 import { PasswordResetService } from './password-reset.service';
 import { PasswordResetDeliveryCipher } from './password-reset-delivery.cipher';
 import { PasswordResetDeliveryService } from './password-reset-delivery.service';
+import { RESET_EMAIL_PROVIDER } from './ports/reset-email-provider.port';
+import { LoggingResetEmailProvider } from './adapters/logging-reset-email-provider';
 
 /**
  * Security module — password-reset token lifecycle. Owns
@@ -20,6 +22,7 @@ import { PasswordResetDeliveryService } from './password-reset-delivery.service'
     PasswordResetService,
     PasswordResetDeliveryCipher,
     PasswordResetDeliveryService,
+    { provide: RESET_EMAIL_PROVIDER, useClass: LoggingResetEmailProvider },
   ],
   exports: [PasswordResetService, PasswordResetDeliveryService],
 })

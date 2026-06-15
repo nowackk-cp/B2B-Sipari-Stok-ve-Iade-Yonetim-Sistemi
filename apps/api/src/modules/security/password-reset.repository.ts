@@ -10,6 +10,12 @@ export interface DeliverableResetToken {
   sealed: SealedSecret;
 }
 
+/** A reset row this worker successfully claimed (lease held) for delivery. */
+export interface ClaimedResetDelivery extends DeliverableResetToken {
+  /** Stable provider idempotency key for this row: `password-reset:{id}`. */
+  providerIdempotencyKey: string;
+}
+
 /**
  * Data access for `password_reset_tokens` (owns the table). Only the token
  * digest is stored for verification; the deliverable token is kept solely as an
@@ -76,10 +82,50 @@ export class PasswordResetRepository {
     return res.count === 1 ? candidate.userId : null;
   }
 
-  /** Load a reset row's sealed deliverable token by id, or null if it is already
-   * delivered (secret cleared) / missing. */
-  async findDeliverable(id: bigint, executor?: DbClient): Promise<DeliverableResetToken | null> {
-    const row = await this.db(executor).passwordResetToken.findUnique({
+  /**
+   * Atomically lease a reset row for delivery WITHOUT erasing the secret.
+   *
+   * A row is claimable when its secret is still present AND it is either fresh
+   * (`PENDING`), retryable (`FAILED`), or a crashed in-flight attempt whose lease
+   * has lapsed (`IN_PROGRESS` with `deliveryLeaseUntil < now`). `SUCCEEDED` rows
+   * (secret already gone) and `UNKNOWN` rows (quarantined for manual review) are
+   * never claimed, and a live lease held by another worker is never stolen.
+   *
+   * The conditional `updateMany` makes this a single-winner under concurrency:
+   * exactly one caller flips the row to `IN_PROGRESS`; the others re-evaluate the
+   * predicate after that commit and match nothing. The winner then re-reads the
+   * still-sealed ciphertext to decrypt in memory. The ciphertext/nonce/tag are
+   * intentionally left intact — they are erased only on delivery success.
+   */
+  async claimForDelivery(
+    id: bigint,
+    now: Date,
+    leaseUntil: Date,
+    executor?: DbClient,
+  ): Promise<ClaimedResetDelivery | null> {
+    const db = this.db(executor);
+    const providerIdempotencyKey = `password-reset:${id}`;
+    const res = await db.passwordResetToken.updateMany({
+      where: {
+        id,
+        deliveryCiphertext: { not: null },
+        OR: [
+          { deliveryStatus: { in: ['PENDING', 'FAILED'] } },
+          { deliveryStatus: 'IN_PROGRESS', deliveryLeaseUntil: { lt: now } },
+        ],
+      },
+      data: {
+        deliveryStatus: 'IN_PROGRESS',
+        deliveryLeaseUntil: leaseUntil,
+        deliveryAttemptCount: { increment: 1 },
+        // Stable across retries (same value every claim) — used as the provider
+        // idempotency key so a crash-retry cannot create a second real email.
+        providerIdempotencyKey,
+      },
+    });
+    if (res.count !== 1) return null;
+
+    const row = await db.passwordResetToken.findUnique({
       where: { id },
       select: {
         id: true,
@@ -89,12 +135,14 @@ export class PasswordResetRepository {
         user: { select: { email: true } },
       },
     });
+    // The winner holds the lease, so the secret is still present here.
     if (!row || !row.deliveryCiphertext || !row.deliveryNonce || !row.deliveryAuthTag) {
       return null;
     }
     return {
       id: row.id,
       email: row.user.email,
+      providerIdempotencyKey,
       sealed: {
         ciphertext: row.deliveryCiphertext,
         nonce: row.deliveryNonce,
@@ -104,20 +152,65 @@ export class PasswordResetRepository {
   }
 
   /**
-   * Atomically claim a reset row's delivery secret: NULL the ciphertext/nonce/tag
-   * and stamp `deliveryConsumedAt`, but only while the ciphertext is still
-   * present. Returns the number of rows claimed (1 = this caller won, 0 = already
-   * delivered). This single-winner guard makes outbox redelivery idempotent: a
-   * second dispatch attempt cannot re-send the email.
+   * Record a successful provider send and ONLY THEN erase the secret: flip to
+   * `SUCCEEDED`, stamp `deliveredAt`, store `providerMessageId`, drop the lease,
+   * and NULL the ciphertext/nonce/tag. Guarded on `IN_PROGRESS` so a stale
+   * worker that lost its lease cannot resurrect or re-erase the row. Returns the
+   * number of rows updated (1 = this worker finalised it).
    */
-  async claimDeliverySecret(id: bigint, now: Date, executor?: DbClient): Promise<number> {
+  async markDelivered(
+    id: bigint,
+    now: Date,
+    providerMessageId: string,
+    executor?: DbClient,
+  ): Promise<number> {
     const res = await this.db(executor).passwordResetToken.updateMany({
-      where: { id, deliveryCiphertext: { not: null } },
+      where: { id, deliveryStatus: 'IN_PROGRESS' },
       data: {
+        deliveryStatus: 'SUCCEEDED',
+        deliveredAt: now,
+        providerMessageId,
+        deliveryLeaseUntil: null,
+        deliveryLastError: null,
+        // The email is durably accepted — erase the deliverable secret now.
         deliveryCiphertext: null,
         deliveryNonce: null,
         deliveryAuthTag: null,
-        deliveryConsumedAt: now,
+      },
+    });
+    return res.count;
+  }
+
+  /**
+   * Mark a retryable failure: flip to `FAILED`, drop the lease, record the error.
+   * The encrypted secret is preserved so a later claim can rebuild the email.
+   * Only valid for an idempotency-capable provider (retry is safe).
+   */
+  async markFailed(id: bigint, error: string, executor?: DbClient): Promise<number> {
+    const res = await this.db(executor).passwordResetToken.updateMany({
+      where: { id, deliveryStatus: 'IN_PROGRESS' },
+      data: {
+        deliveryStatus: 'FAILED',
+        deliveryLeaseUntil: null,
+        deliveryLastError: error,
+      },
+    });
+    return res.count;
+  }
+
+  /**
+   * Quarantine an ambiguous delivery for manual review: flip to `UNKNOWN`, drop
+   * the lease, record the error, and KEEP the secret. Used when the provider
+   * cannot guarantee exactly-once (an auto-retry could send a duplicate), so the
+   * row is deliberately not re-claimable until a human resolves it.
+   */
+  async markUnknown(id: bigint, error: string, executor?: DbClient): Promise<number> {
+    const res = await this.db(executor).passwordResetToken.updateMany({
+      where: { id, deliveryStatus: 'IN_PROGRESS' },
+      data: {
+        deliveryStatus: 'UNKNOWN',
+        deliveryLeaseUntil: null,
+        deliveryLastError: error,
       },
     });
     return res.count;

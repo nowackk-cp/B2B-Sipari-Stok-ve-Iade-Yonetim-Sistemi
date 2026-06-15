@@ -14,6 +14,12 @@ import type {
   PasswordResetRequestedEvent,
 } from '../../src/modules/auth/ports/email-outbox.port';
 import { PasswordResetDeliveryService } from '../../src/modules/security/password-reset-delivery.service';
+import { PasswordResetRepository } from '../../src/modules/security/password-reset.repository';
+import { PasswordResetDeliveryCipher } from '../../src/modules/security/password-reset-delivery.cipher';
+import {
+  RESET_EMAIL_PROVIDER,
+  type ResetEmailProvider,
+} from '../../src/modules/security/ports/reset-email-provider.port';
 
 /**
  * Truncate every application table so each test starts clean. Guarded against
@@ -91,27 +97,40 @@ export interface TestApp {
   clock: MutableClock;
   rateLimiter: InMemoryRateLimiter;
   email: CapturingEmailOutbox;
-  /** The approved mail-delivery boundary: decrypts the sealed reset token. */
+  /** The approved mail-delivery boundary: claims/decrypts the sealed reset token. */
   delivery: PasswordResetDeliveryService;
+  /** Repository, for tests that drive the lease/claim flow directly. */
+  resets: PasswordResetRepository;
+  /** The delivery cipher, for tests that decrypt a claimed secret in memory. */
+  deliveryCipher: PasswordResetDeliveryCipher;
+}
+
+export interface CreateTestAppOptions {
+  /** Override the password-reset email provider (e.g. a counting/failing fake). */
+  emailProvider?: ResetEmailProvider;
 }
 
 /**
  * Boot the full Nest app against the real test database with deterministic
  * adapters: a controllable clock, an in-memory rate limiter (no Redis needed in
- * tests) and a capturing email outbox. The DB is truncated first.
+ * tests) and a capturing email outbox. The DB is truncated first. An optional
+ * reset email provider override lets crash/idempotency tests inject a fake.
  */
-export async function createTestApp(): Promise<TestApp> {
+export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<TestApp> {
   const clock = new MutableClock();
   const email = new CapturingEmailOutbox();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  let builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(CLOCK)
     .useValue(clock)
     .overrideProvider(RATE_LIMITER)
     .useClass(InMemoryRateLimiter)
     .overrideProvider(EMAIL_OUTBOX)
-    .useValue(email)
-    .compile();
+    .useValue(email);
+  if (opts.emailProvider) {
+    builder = builder.overrideProvider(RESET_EMAIL_PROVIDER).useValue(opts.emailProvider);
+  }
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
   configureApp(app, app.get(AppConfigService));
@@ -122,7 +141,19 @@ export async function createTestApp(): Promise<TestApp> {
 
   const rateLimiter = app.get(RATE_LIMITER) as InMemoryRateLimiter;
   const delivery = app.get(PasswordResetDeliveryService);
-  return { app, http: app.getHttpServer(), prisma, clock, rateLimiter, email, delivery };
+  const resets = app.get(PasswordResetRepository);
+  const deliveryCipher = app.get(PasswordResetDeliveryCipher);
+  return {
+    app,
+    http: app.getHttpServer(),
+    prisma,
+    clock,
+    rateLimiter,
+    email,
+    delivery,
+    resets,
+    deliveryCipher,
+  };
 }
 
 /**

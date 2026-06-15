@@ -1,0 +1,305 @@
+import request from 'supertest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { type TestApp, closeTestApp, createTestApp, createUser, resetState } from './helpers';
+import { DELIVERY_LEASE_MS } from '../../src/modules/security/password-reset-delivery.service';
+import type {
+  ResetEmailProvider,
+  SendResetEmailCommand,
+  SendResetEmailResult,
+} from '../../src/modules/security/ports/reset-email-provider.port';
+
+const BASE = '/api/v1/auth';
+
+/** Mint a reset row via the public endpoint; return its id (the outbox ref). */
+async function requestReset(ctx: TestApp): Promise<bigint> {
+  const user = await createUser(ctx.prisma);
+  await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
+  return ctx.email.last().passwordResetTokenId;
+}
+
+async function rowOf(ctx: TestApp, id: bigint) {
+  const row = await ctx.prisma.passwordResetToken.findUnique({ where: { id } });
+  if (!row) throw new Error(`reset row ${id} not found`);
+  return row;
+}
+
+/**
+ * Idempotent fake provider: records exactly one real delivery per idempotency
+ * key (a retry with the same key collapses to the first), while counting every
+ * send attempt — so a crash-retry can be distinguished from a duplicate email.
+ */
+class CountingIdempotentProvider implements ResetEmailProvider {
+  readonly supportsIdempotency = true;
+  readonly delivered = new Map<string, string>();
+  sendCalls = 0;
+  async send(cmd: SendResetEmailCommand): Promise<SendResetEmailResult> {
+    this.sendCalls += 1;
+    const existing = this.delivered.get(cmd.idempotencyKey);
+    if (existing) return { providerMessageId: existing };
+    const providerMessageId = `msg-${this.delivered.size + 1}`;
+    this.delivered.set(cmd.idempotencyKey, providerMessageId);
+    return { providerMessageId };
+  }
+  get realDeliveries(): number {
+    return this.delivered.size;
+  }
+  reset(): void {
+    this.delivered.clear();
+    this.sendCalls = 0;
+  }
+}
+
+class FailingIdempotentProvider implements ResetEmailProvider {
+  readonly supportsIdempotency = true;
+  async send(): Promise<SendResetEmailResult> {
+    throw new Error('smtp temporarily unavailable');
+  }
+}
+
+class FailingNonIdempotentProvider implements ResetEmailProvider {
+  readonly supportsIdempotency = false;
+  async send(): Promise<SendResetEmailResult> {
+    throw new Error('ambiguous gateway timeout');
+  }
+}
+
+describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
+  // --- default (idempotent placeholder) provider --------------------------
+  describe('claim + lease lifecycle', () => {
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp();
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+    });
+
+    it('claim leases the row WITHOUT erasing the ciphertext (secret survives)', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(claim).not.toBeNull();
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('IN_PROGRESS');
+      expect(row.deliveryLeaseUntil).not.toBeNull();
+      expect(row.deliveryAttemptCount).toBe(1);
+      expect(row.providerIdempotencyKey).toBe(`password-reset:${id}`);
+      // The secret is still fully present after a claim.
+      expect(row.deliveryCiphertext).not.toBeNull();
+      expect(row.deliveryNonce).not.toBeNull();
+      expect(row.deliveryAuthTag).not.toBeNull();
+    });
+
+    it('preserves the secret when a worker crashes after decrypt, before send', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(claim).not.toBeNull();
+      // The worker decrypts in memory then "crashes" — no markDelivered runs.
+      const token = ctx.deliveryCipher.decrypt(claim!.sealed);
+      expect(token).toBeTruthy();
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('IN_PROGRESS');
+      expect(row.deliveryCiphertext).not.toBeNull();
+      expect(row.deliveredAt).toBeNull();
+    });
+
+    it('blocks re-claim under a live lease but allows it after the lease lapses', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      // Worker A claims and crashes (in-flight under a live lease).
+      await ctx.resets.claimForDelivery(id, now, new Date(now.getTime() + DELIVERY_LEASE_MS));
+
+      // Worker B cannot steal a live lease.
+      const blocked = await ctx.delivery.deliver(id);
+      expect(blocked.delivered).toBe(false);
+      expect(blocked).toMatchObject({ reason: 'not_claimable' });
+
+      // Once the lease lapses, a retry re-claims and actually sends.
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const retry = await ctx.delivery.deliver(id);
+      expect(retry.delivered).toBe(true);
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('SUCCEEDED');
+      expect(row.deliveryAttemptCount).toBe(2);
+    });
+
+    it('NULLs the secret only after a successful provider send', async () => {
+      const id = await requestReset(ctx);
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(true);
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('SUCCEEDED');
+      expect(row.deliveredAt).not.toBeNull();
+      expect(row.providerMessageId).not.toBeNull();
+      expect(row.deliveryCiphertext).toBeNull();
+      expect(row.deliveryNonce).toBeNull();
+      expect(row.deliveryAuthTag).toBeNull();
+    });
+
+    it('never re-sends a SUCCEEDED row', async () => {
+      const id = await requestReset(ctx);
+      expect((await ctx.delivery.deliver(id)).delivered).toBe(true);
+      const second = await ctx.delivery.deliver(id);
+      expect(second.delivered).toBe(false);
+      expect(second).toMatchObject({ reason: 'not_claimable' });
+    });
+
+    it('lets only ONE of two concurrent workers win the claim', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      const lease = new Date(now.getTime() + DELIVERY_LEASE_MS);
+      const [a, b] = await Promise.all([
+        ctx.resets.claimForDelivery(id, now, lease),
+        ctx.resets.claimForDelivery(id, now, lease),
+      ]);
+      const winners = [a, b].filter((c) => c !== null);
+      expect(winners).toHaveLength(1);
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('IN_PROGRESS');
+      // Exactly one claim took effect.
+      expect(row.deliveryAttemptCount).toBe(1);
+    });
+  });
+
+  // --- idempotent provider: crash AFTER send, BEFORE the DB update ----------
+  describe('idempotent provider crash-after-send', () => {
+    const provider = new CountingIdempotentProvider();
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp({ emailProvider: provider });
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+      provider.reset();
+    });
+
+    it('reuses the same idempotency key on retry and records ONE real delivery', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+
+      // Worker A: claim, decrypt, send (provider records the email)… then CRASH
+      // before the DB success update — the row stays IN_PROGRESS, secret intact.
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      const token = ctx.deliveryCipher.decrypt(claim!.sealed);
+      await provider.send({
+        email: claim!.email,
+        token,
+        idempotencyKey: claim!.providerIdempotencyKey,
+      });
+      expect(provider.sendCalls).toBe(1);
+      expect(provider.realDeliveries).toBe(1);
+      // Crash: secret must still be present for a retry.
+      expect((await rowOf(ctx, id)).deliveryCiphertext).not.toBeNull();
+
+      // Lease lapses → retry re-claims and sends again with the SAME key.
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const retry = await ctx.delivery.deliver(id);
+      expect(retry.delivered).toBe(true);
+
+      // Two send attempts, but the idempotency key collapsed them to ONE email.
+      expect(provider.sendCalls).toBe(2);
+      expect(provider.realDeliveries).toBe(1);
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('SUCCEEDED');
+      expect(row.deliveryCiphertext).toBeNull();
+      expect(row.providerMessageId).toBe('msg-1');
+    });
+  });
+
+  // --- idempotent provider failure: retryable, secret preserved ------------
+  describe('idempotent provider failure', () => {
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp({ emailProvider: new FailingIdempotentProvider() });
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+    });
+
+    it('marks FAILED and preserves the secret for a later retry', async () => {
+      const id = await requestReset(ctx);
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(false);
+      expect(result).toMatchObject({ reason: 'failed' });
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('FAILED');
+      expect(row.deliveryLeaseUntil).toBeNull();
+      expect(row.deliveryLastError).toBeTruthy();
+      // Secret preserved — the email is not lost.
+      expect(row.deliveryCiphertext).not.toBeNull();
+
+      // FAILED is retryable: a later claim can re-acquire the row.
+      const now = ctx.clock.now();
+      const reclaim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(reclaim).not.toBeNull();
+    });
+  });
+
+  // --- non-idempotent provider: ambiguous → UNKNOWN, manual review ----------
+  describe('non-idempotent provider ambiguity', () => {
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp({ emailProvider: new FailingNonIdempotentProvider() });
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+    });
+
+    it('quarantines as UNKNOWN, preserves the secret, and does not auto-retry', async () => {
+      const id = await requestReset(ctx);
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(false);
+      expect(result).toMatchObject({ reason: 'unknown' });
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('UNKNOWN');
+      expect(row.deliveryLeaseUntil).toBeNull();
+      // Secret preserved (not auto-erased) for manual review.
+      expect(row.deliveryCiphertext).not.toBeNull();
+
+      // UNKNOWN is NOT auto-reclaimable — it requires a human, so a second
+      // delivery attempt does nothing (no uncontrolled retry → no duplicate).
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const again = await ctx.delivery.deliver(id);
+      expect(again.delivered).toBe(false);
+      expect(again).toMatchObject({ reason: 'not_claimable' });
+      expect((await rowOf(ctx, id)).deliveryStatus).toBe('UNKNOWN');
+    });
+  });
+});

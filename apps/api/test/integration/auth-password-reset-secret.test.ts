@@ -85,23 +85,26 @@ describe('password reset delivery secret (AUTH-BLOCK-001, real PostgreSQL)', () 
     expect(await countRawTokenRows(ctx.prisma, token)).toBe(0);
   });
 
-  it('erases the sealed secret after delivery and is idempotent on redelivery', async () => {
+  it('erases the sealed secret only after success and is idempotent on redelivery', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
     const event = ctx.email.last();
 
     const beforeRow = await ctx.prisma.passwordResetToken.findFirst({ where: { userId: user.id } });
-    expect(beforeRow!.deliveryConsumedAt).toBeNull();
+    expect(beforeRow!.deliveryStatus).toBe('PENDING');
+    expect(beforeRow!.deliveredAt).toBeNull();
 
     const first = await ctx.delivery.deliver(event.passwordResetTokenId);
     expect(first.delivered).toBe(true);
 
-    // Ciphertext/nonce/tag are NULLed and the delivery is stamped consumed.
+    // Success source of truth is the status; the secret is NULLed only now.
     const afterRow = await ctx.prisma.passwordResetToken.findFirst({ where: { userId: user.id } });
+    expect(afterRow!.deliveryStatus).toBe('SUCCEEDED');
+    expect(afterRow!.deliveredAt).not.toBeNull();
+    expect(afterRow!.providerMessageId).not.toBeNull();
     expect(afterRow!.deliveryCiphertext).toBeNull();
     expect(afterRow!.deliveryNonce).toBeNull();
     expect(afterRow!.deliveryAuthTag).toBeNull();
-    expect(afterRow!.deliveryConsumedAt).not.toBeNull();
 
     // An at-least-once outbox redelivery does not send a second email.
     const second = await ctx.delivery.deliver(event.passwordResetTokenId);
