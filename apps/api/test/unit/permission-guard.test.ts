@@ -16,6 +16,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { AppModule } from '../../src/app.module';
 import { JwtAuthGuard } from '../../src/modules/auth/guards/jwt-auth.guard';
 import { TestAuthzController } from '../support/test-authz.controller';
+import { MergedAuthzProbeController } from '../support/merged-authz-probe.controller';
 
 // NestJS stores @UseGuards on the handler under this metadata key, and @Module
 // providers under this one.
@@ -174,6 +175,133 @@ describe('PermissionGuard', () => {
       req,
     );
     expect(await guard.canActivate(ctx)).toBe(true);
+  });
+});
+
+describe('PermissionGuard merges controller + handler metadata', () => {
+  const reflector = new Reflector();
+
+  const principal: AuthPrincipal = {
+    userId: 1n,
+    userPublicId: 'u-1',
+    sessionId: 's-1',
+    email: 'u@test.local',
+    fullName: 'U',
+    roles: ['SALES'],
+  };
+
+  /**
+   * A guard whose permission service really evaluates `hasAllPermissions` against
+   * a held set AND records every `required` list it was asked about — so a test
+   * can assert both the access decision and the exact (merged, de-duplicated)
+   * codes the guard enforced.
+   */
+  function recordingGuard(held: string[]): { guard: PermissionGuard; calls: string[][] } {
+    const heldSet = new Set(held);
+    const calls: string[][] = [];
+    const service = {
+      async hasAllPermissions(_subject: PermissionSubject, required: string[]): Promise<boolean> {
+        calls.push(required);
+        return required.every((code) => heldSet.has(code));
+      },
+    } as unknown as PermissionService;
+    return { guard: new PermissionGuard(reflector, service), calls };
+  }
+
+  const reqWithPrincipal = { [PRINCIPAL_KEY]: principal };
+
+  it('1. requires BOTH the controller and handler permissions (order:read + order:approve)', async () => {
+    const { guard, calls } = recordingGuard(['order:read', 'order:approve']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.approve,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    expect(await guard.canActivate(ctx)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect([...(calls[0] ?? [])].sort()).toEqual(['order:approve', 'order:read']);
+  });
+
+  it('2. denies (403) a user holding only the controller permission (order:read)', async () => {
+    const { guard } = recordingGuard(['order:read']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.approve,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('3. denies (403) a user holding only the handler permission (order:approve)', async () => {
+    const { guard } = recordingGuard(['order:approve']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.approve,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    await expect(guard.canActivate(ctx)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('4. allows a user holding both the controller and handler permissions', async () => {
+    const { guard } = recordingGuard(['order:read', 'order:approve']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.approve,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    expect(await guard.canActivate(ctx)).toBe(true);
+  });
+
+  it('5. de-duplicates a code declared on both controller and handler (checked once)', async () => {
+    const { guard, calls } = recordingGuard(['order:read']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.duplicate,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    expect(await guard.canActivate(ctx)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(['order:read']);
+  });
+
+  it('6. applies only the controller permission when the handler declares none', async () => {
+    const { guard, calls } = recordingGuard(['order:read']);
+    const ctx = ctxFor(
+      MergedAuthzProbeController.prototype.inherited,
+      MergedAuthzProbeController,
+      reqWithPrincipal,
+    );
+    expect(await guard.canActivate(ctx)).toBe(true);
+    expect(calls[0]).toEqual(['order:read']);
+    // …and a user without it is denied.
+    const denied = recordingGuard([]);
+    await expect(
+      denied.guard.canActivate(
+        ctxFor(
+          MergedAuthzProbeController.prototype.inherited,
+          MergedAuthzProbeController,
+          reqWithPrincipal,
+        ),
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('7. applies only the handler permission when the controller declares none', async () => {
+    const { guard, calls } = recordingGuard(['product:read']);
+    const ctx = ctxFor(
+      TestAuthzController.prototype.singlePermissionRoute,
+      TestAuthzController,
+      reqWithPrincipal,
+    );
+    expect(await guard.canActivate(ctx)).toBe(true);
+    expect(calls[0]).toEqual(['product:read']);
+  });
+
+  it('8. performs no permission check when neither level declares metadata', async () => {
+    const { guard, calls } = recordingGuard([]);
+    const ctx = ctxFor(TestAuthzController.prototype.publicRoute, TestAuthzController, {});
+    expect(await guard.canActivate(ctx)).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });
 

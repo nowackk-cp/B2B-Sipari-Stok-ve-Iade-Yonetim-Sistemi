@@ -14,9 +14,11 @@ import { PermissionService } from '../permission.service';
 /**
  * Permission authorization guard (TASK-010, SECURITY_MODEL §2).
  *
- * Resolves the codes declared by `@RequirePermissions(...)` (method overrides
- * class) and allows the request only when the caller's effective permissions —
- * loaded fresh from PostgreSQL, NEVER from a JWT claim — contain ALL of them.
+ * Resolves the codes declared by `@RequirePermissions(...)` — the controller- and
+ * handler-level declarations are MERGED (a handler permission ADDS to, never
+ * replaces, the controller's base permission) — and allows the request only when
+ * the caller's effective permissions — loaded fresh from PostgreSQL, NEVER from a
+ * JWT claim — contain ALL of them.
  *
  * Deny-by-default: a permission-protected route with no authenticated principal
  * is rejected (401); a principal missing any required code is rejected (403). It
@@ -34,12 +36,17 @@ export class PermissionGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const required = this.reflector.getAllAndOverride<string[] | undefined>(
-      REQUIRED_PERMISSIONS_KEY,
-      [context.getHandler(), context.getClass()],
-    );
-    // No declared permissions → nothing for this guard to enforce.
-    if (!required || required.length === 0) return true;
+    // Merge (not override) the controller- and handler-level declarations: a
+    // class-level base permission and a handler-level permission are BOTH
+    // required. getAllAndMerge concatenates the two arrays; de-duplicate so a
+    // code declared at both levels is enforced exactly once.
+    const declared = this.reflector.getAllAndMerge<string[]>(REQUIRED_PERMISSIONS_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    const required = [...new Set(declared)];
+    // No declared permissions on either level → nothing for this guard to enforce.
+    if (required.length === 0) return true;
 
     const req = context.switchToHttp().getRequest<Request & Record<string, unknown>>();
     const principal = req[PRINCIPAL_KEY] as AuthPrincipal | undefined;
