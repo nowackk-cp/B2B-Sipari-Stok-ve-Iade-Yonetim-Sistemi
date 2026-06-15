@@ -17,59 +17,60 @@ ALTER TABLE "users" ADD COLUMN "company_id" BIGINT;
 ALTER TABLE "roles" ADD COLUMN "company_id" BIGINT;
 ALTER TABLE "user_roles" ADD COLUMN "company_id" BIGINT;
 
--- 2. Backfill existing RBAC data into a single tenant, refusing to guess when a
---    role is shared across users that would belong to different companies.
+-- 2. Backfill existing RBAC data into its tenant — FAIL-CLOSED. Legacy data is
+--    only backfilled when the tenant mapping is unambiguous (exactly one company
+--    exists). With zero or multiple companies the migration refuses to guess and
+--    aborts; an operator must first ship an explicit user→company / role→company
+--    mapping migration. The migration NEVER silently picks a "default"/lowest
+--    company (RBAC-TI-001).
 DO $$
 DECLARE
-  default_company_id BIGINT;
-  ambiguous RECORD;
+  legacy_rows BIGINT;
+  company_count BIGINT;
+  target_company_id BIGINT;
 BEGIN
-  -- Deterministic default tenant: the lowest existing company id, or a freshly
-  -- created canonical 'Default Company' when the table is empty.
-  SELECT id INTO default_company_id FROM companies ORDER BY id LIMIT 1;
-  IF default_company_id IS NULL THEN
-    INSERT INTO companies (name, default_currency)
-    VALUES ('Default Company', 'TRY')
-    RETURNING id INTO default_company_id;
+  -- Is there any legacy RBAC data that now needs a tenant assigned?
+  SELECT
+    (SELECT COUNT(*) FROM users) +
+    (SELECT COUNT(*) FROM roles) +
+    (SELECT COUNT(*) FROM user_roles)
+  INTO legacy_rows;
+
+  -- Empty RBAC data (fresh database): nothing to backfill. The NOT NULL
+  -- constraints added below are then trivially satisfied — even when no company
+  -- exists yet. This is the ONLY case allowed to proceed without a company.
+  IF legacy_rows = 0 THEN
+    RETURN;
   END IF;
 
-  -- Every existing user joins the default company.
-  UPDATE users SET company_id = default_company_id WHERE company_id IS NULL;
+  -- Legacy data EXISTS, so every row must receive a tenant. The mapping is only
+  -- unambiguous when EXACTLY ONE company is present:
+  --   • 0 companies  → there is no tenant to assign these rows to;
+  --   • 2+ companies → which tenant each legacy row belongs to is unknowable here.
+  -- In both cases fail loudly and require an explicit mapping migration first.
+  -- We deliberately do NOT create a default company, nor pick the lowest/first
+  -- company, nor guess from existing assignments.
+  SELECT COUNT(*) INTO company_count FROM companies;
 
-  -- A role cannot be split across tenants: if it is assigned to users that would
-  -- land in more than one company, fail loudly instead of silently guessing.
-  FOR ambiguous IN
-    SELECT ur.role_id AS role_id, COUNT(DISTINCT u.company_id) AS companies
-    FROM user_roles ur
-    JOIN users u ON u.id = ur.user_id
-    GROUP BY ur.role_id
-    HAVING COUNT(DISTINCT u.company_id) > 1
-  LOOP
+  IF company_count <> 1 THEN
     RAISE EXCEPTION
-      'TENANT_BACKFILL_AMBIGUOUS: role % is assigned to users spanning % companies; '
-      'split it into one role per company before applying this migration',
-      ambiguous.role_id, ambiguous.companies;
-  END LOOP;
+      'TENANT_BACKFILL_AMBIGUOUS: % companies are present but legacy users/roles/'
+      'user_roles exist; backfill requires exactly one company. Ship an explicit '
+      'user-to-company and role-to-company mapping migration before applying this one.',
+      company_count;
+  END IF;
 
-  -- Each role takes the company of the users it is assigned to; unassigned roles
-  -- default to the default tenant.
-  UPDATE roles r
-  SET company_id = COALESCE(
-    (SELECT MIN(u.company_id)
-     FROM user_roles ur JOIN users u ON u.id = ur.user_id
-     WHERE ur.role_id = r.id),
-    default_company_id
-  )
-  WHERE r.company_id IS NULL;
+  -- Unambiguous: a single tenant owns all legacy RBAC rows.
+  SELECT id INTO target_company_id FROM companies;
 
-  -- An assignment inherits its user's company (== its role's company by the
-  -- ambiguity guard above).
-  UPDATE user_roles ur
-  SET company_id = u.company_id
-  FROM users u
-  WHERE u.id = ur.user_id AND ur.company_id IS NULL;
+  UPDATE users      SET company_id = target_company_id WHERE company_id IS NULL;
+  UPDATE roles      SET company_id = target_company_id WHERE company_id IS NULL;
+  UPDATE user_roles SET company_id = target_company_id WHERE company_id IS NULL;
 
-  -- Defensive final assertion before the composite FKs are added.
+  -- Defensive final assertion before the composite FKs are added: every
+  -- assignment must agree with BOTH its user and its role company. With a single
+  -- tenant this always holds; the check guards against any future change that
+  -- could let these three updates diverge.
   IF EXISTS (
     SELECT 1 FROM user_roles ur
     JOIN users u ON u.id = ur.user_id
