@@ -38,16 +38,24 @@ function build(over: {
   provider?: ResetEmailProvider;
   /** Row count the finalizers report (0 = this worker lost the claim). */
   finalizerCount?: number;
+  /** Row count `markSendStarted` reports (0 = the claim was superseded). */
+  sendStartedCount?: number;
+  /** Row count `quarantineStaleSendStarted` reports (>0 = a stranded send). */
+  quarantineCount?: number;
 }) {
   const claimResult = 'claimResult' in over ? over.claimResult : claim();
   const count = over.finalizerCount ?? 1;
   const repo = {
     claimForDelivery: vi.fn(async () => claimResult),
+    markSendStarted: vi.fn(async () => over.sendStartedCount ?? 1),
+    quarantineStaleSendStarted: vi.fn(async () => over.quarantineCount ?? 0),
     markDelivered: vi.fn(async () => count),
     markFailed: vi.fn(async () => count),
     markUnknown: vi.fn(async () => count),
   } as unknown as PasswordResetRepository & {
     claimForDelivery: ReturnType<typeof vi.fn>;
+    markSendStarted: ReturnType<typeof vi.fn>;
+    quarantineStaleSendStarted: ReturnType<typeof vi.fn>;
     markDelivered: ReturnType<typeof vi.fn>;
     markFailed: ReturnType<typeof vi.fn>;
     markUnknown: ReturnType<typeof vi.fn>;
@@ -75,12 +83,16 @@ describe('PasswordResetDeliveryService (lease/crash safety)', () => {
     const result = await service.deliver(7n);
 
     expect(result).toMatchObject({ delivered: true, providerMessageId: 'pmid-1' });
-    // Lease window is honoured.
+    // Lease window is honoured; the provider's idempotency capability is passed so
+    // the repo can decide whether a started send is re-claimable.
     expect(repo.claimForDelivery).toHaveBeenCalledWith(
       7n,
       NOW,
       new Date(NOW.getTime() + DELIVERY_LEASE_MS),
+      true,
     );
+    // The send is marked started (fenced by the claim token) before the provider call.
+    expect(repo.markSendStarted).toHaveBeenCalledWith(7n, CLAIM_TOKEN, NOW);
     // Stable provider idempotency key, passed through to the provider.
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ idempotencyKey: 'password-reset:7' }),
@@ -89,8 +101,11 @@ describe('PasswordResetDeliveryService (lease/crash safety)', () => {
     expect(repo.markDelivered).toHaveBeenCalledTimes(1);
     // Finalization is fenced by the claim token from the claim.
     expect(repo.markDelivered).toHaveBeenCalledWith(7n, CLAIM_TOKEN, NOW, 'pmid-1');
+    // Order: markSendStarted → provider.send → markDelivered.
+    const startedOrder = repo.markSendStarted.mock.invocationCallOrder[0] ?? 0;
     const sendOrder = send.mock.invocationCallOrder[0] ?? 0;
     const markOrder = repo.markDelivered.mock.invocationCallOrder[0] ?? 0;
+    expect(startedOrder).toBeLessThan(sendOrder);
     expect(sendOrder).toBeLessThan(markOrder);
   });
 
@@ -161,6 +176,66 @@ describe('PasswordResetDeliveryService (lease/crash safety)', () => {
     expect(repo.markUnknown).toHaveBeenCalledTimes(1);
     expect(repo.markFailed).not.toHaveBeenCalled();
     expect(repo.markDelivered).not.toHaveBeenCalled();
+  });
+
+  it('returns claim_lost and never sends when markSendStarted updates zero rows', async () => {
+    // A newer worker re-claimed (token rotated) between claim and markSendStarted.
+    const { service, repo, provider } = build({ sendStartedCount: 0 });
+
+    const result = await service.deliver(7n);
+
+    expect(result).toEqual({ delivered: false, reason: 'claim_lost' });
+    // Crucially: the provider was NEVER called, so no duplicate email.
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(repo.markDelivered).not.toHaveBeenCalled();
+    expect(repo.markFailed).not.toHaveBeenCalled();
+    expect(repo.markUnknown).not.toHaveBeenCalled();
+  });
+
+  it('quarantines a stranded started send (non-idempotent) as UNKNOWN without sending', async () => {
+    // Claim returns null (the row is a lapsed in-flight send that started), and a
+    // non-idempotent provider must not auto-resend → quarantine to UNKNOWN.
+    const provider = {
+      supportsIdempotency: false,
+      send: vi.fn(async () => ({ providerMessageId: 'pmid-x' })),
+    } as unknown as ResetEmailProvider;
+    const { service, repo } = build({ claimResult: null, provider, quarantineCount: 1 });
+
+    const result = await service.deliver(7n);
+
+    expect(result).toEqual({ delivered: false, reason: 'unknown' });
+    expect(repo.quarantineStaleSendStarted).toHaveBeenCalledWith(
+      7n,
+      NOW,
+      'send_started_no_idempotency',
+    );
+    // No provider call, no finalizer mutation — the started send is not retried.
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(repo.markDelivered).not.toHaveBeenCalled();
+  });
+
+  it('reports not_claimable (non-idempotent) when there is nothing stranded to quarantine', async () => {
+    const provider = {
+      supportsIdempotency: false,
+      send: vi.fn(async () => ({ providerMessageId: 'pmid-x' })),
+    } as unknown as ResetEmailProvider;
+    const { service, repo } = build({ claimResult: null, provider, quarantineCount: 0 });
+
+    const result = await service.deliver(7n);
+
+    expect(result).toEqual({ delivered: false, reason: 'not_claimable' });
+    expect(repo.quarantineStaleSendStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attempt a stranded-send quarantine for an idempotent provider', async () => {
+    // Idempotent providers re-claim a started send safely, so there is never a
+    // stranded row to quarantine — quarantineStaleSendStarted must not be called.
+    const { service, repo } = build({ claimResult: null });
+
+    const result = await service.deliver(7n);
+
+    expect(result).toEqual({ delivered: false, reason: 'not_claimable' });
+    expect(repo.quarantineStaleSendStarted).not.toHaveBeenCalled();
   });
 
   it('quarantines as UNKNOWN and never sends when the secret fails to decrypt', async () => {

@@ -337,6 +337,13 @@ model PasswordResetToken {
   deliveryStatus         PasswordResetDeliveryStatus @default(PENDING) @map("delivery_status")
   deliveryLeaseUntil     DateTime?                   @map("delivery_lease_until") @db.Timestamptz(6)
   deliveryAttemptCount   Int                         @default(0) @map("delivery_attempt_count")
+  // Stamped immediately BEFORE the provider send is attempted, fenced by the
+  // claim token. It is the commit point that makes a non-idempotent send (SMTP)
+  // crash-safe: once set, a lapsed in-flight row is NOT auto-reclaimed (a second
+  // sendMail could deliver a duplicate). Recovery quarantines such a row as
+  // UNKNOWN for manual review instead. NULL means the provider was never called,
+  // so the row stays freely re-claimable (AUTH-RESET-DELIVERY-003).
+  deliverySendStartedAt  DateTime?                   @map("delivery_send_started_at") @db.Timestamptz(6)
   // Fencing token: a fresh CSPRNG value minted on every successful claim. A
   // finalizer (markDelivered/Failed/Unknown) must present the token it claimed
   // with; once a newer worker re-claims, the token rotates and the stale worker's

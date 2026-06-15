@@ -99,6 +99,15 @@ export class PasswordResetRepository {
    * (secret already gone) and `UNKNOWN` rows (quarantined for manual review) are
    * never claimed, and a live lease held by another worker is never stolen.
    *
+   * A lapsed in-flight row is only re-claimed when re-sending is safe:
+   *   - `delivery_send_started_at IS NULL` → the provider was never called, so a
+   *     re-claim cannot duplicate; always reclaimable.
+   *   - `delivery_send_started_at IS NOT NULL` → a send was already attempted. It
+   *     is only re-claimed when `reclaimAfterProviderSendStarted` is true (the
+   *     provider deduplicates by idempotency key, so a re-send collapses). For a
+   *     non-idempotent provider (SMTP) the caller leaves this false and instead
+   *     quarantines the stranded row (see `quarantineStaleSendStarted`).
+   *
    * The conditional `updateMany` makes this a single-winner under concurrency:
    * exactly one caller flips the row to `IN_PROGRESS`; the others re-evaluate the
    * predicate after that commit and match nothing. The winner then re-reads the
@@ -113,6 +122,7 @@ export class PasswordResetRepository {
     id: bigint,
     now: Date,
     leaseUntil: Date,
+    reclaimAfterProviderSendStarted = false,
     executor?: DbClient,
   ): Promise<ClaimedResetDelivery | null> {
     const db = this.db(executor);
@@ -126,7 +136,15 @@ export class PasswordResetRepository {
         deliveryCiphertext: { not: null },
         OR: [
           { deliveryStatus: { in: ['PENDING', 'FAILED'] } },
-          { deliveryStatus: 'IN_PROGRESS', deliveryLeaseUntil: { lt: now } },
+          // A lapsed in-flight attempt is only re-claimable once it is safe to
+          // re-send: either the provider never started (send-started mark is
+          // NULL) or the provider deduplicates (idempotency-capable caller opts in
+          // via `reclaimAfterProviderSendStarted`).
+          {
+            deliveryStatus: 'IN_PROGRESS',
+            deliveryLeaseUntil: { lt: now },
+            ...(reclaimAfterProviderSendStarted ? {} : { deliverySendStartedAt: null }),
+          },
         ],
       },
       data: {
@@ -177,6 +195,63 @@ export class PasswordResetRepository {
         authTag: row.deliveryAuthTag,
       },
     };
+  }
+
+  /**
+   * Stamp the instant the provider call is about to be attempted, BEFORE handing
+   * the message to the provider. Guarded on `IN_PROGRESS` AND a matching
+   * `deliveryClaimToken`, so a superseded worker cannot mark a newer worker's
+   * claim. This is the commit point that makes a non-idempotent send crash-safe:
+   * once `deliverySendStartedAt` is set, a lapsed in-flight row is no longer
+   * auto-reclaimed (a re-send could duplicate); it is quarantined instead. Returns
+   * the number of rows updated (0 = this worker lost claim ownership).
+   */
+  async markSendStarted(
+    id: bigint,
+    claimToken: string,
+    sendStartedAt: Date,
+    executor?: DbClient,
+  ): Promise<number> {
+    const res = await this.db(executor).passwordResetToken.updateMany({
+      where: { id, deliveryStatus: 'IN_PROGRESS', deliveryClaimToken: claimToken },
+      data: { deliverySendStartedAt: sendStartedAt },
+    });
+    return res.count;
+  }
+
+  /**
+   * Quarantine a stranded send: a lapsed `IN_PROGRESS` row whose provider call had
+   * already started (`deliverySendStartedAt` set) but never reached a terminal
+   * state — the worker crashed after handing the message to the provider. For a
+   * non-idempotent provider an automatic re-send could deliver a duplicate, so the
+   * row is flipped to `UNKNOWN` for manual review and the secret is KEPT.
+   *
+   * Unlike the claim-token-fenced finalizers, this is NOT guarded by a claim token
+   * — the recovering worker never held one for this row. It is instead fenced on a
+   * lapsed lease (`deliveryLeaseUntil < now`) and a present send-started mark, so a
+   * live claim is never disturbed and a row that never started is never affected.
+   * Returns the number of rows updated (0 = nothing was stranded).
+   */
+  async quarantineStaleSendStarted(
+    id: bigint,
+    now: Date,
+    error: string,
+    executor?: DbClient,
+  ): Promise<number> {
+    const res = await this.db(executor).passwordResetToken.updateMany({
+      where: {
+        id,
+        deliveryStatus: 'IN_PROGRESS',
+        deliveryLeaseUntil: { lt: now },
+        deliverySendStartedAt: { not: null },
+      },
+      data: {
+        deliveryStatus: 'UNKNOWN',
+        deliveryLeaseUntil: null,
+        deliveryLastError: error,
+      },
+    });
+    return res.count;
   }
 
   /**

@@ -66,6 +66,30 @@ class FailingNonIdempotentProvider implements ResetEmailProvider {
 }
 
 /**
+ * Non-idempotent provider (like SMTP) that counts sends so a crash-after-send can
+ * be told apart from a duplicate. With no native dedup, every send IS a real
+ * delivery, so `realDeliveries === sendCalls`. An optional `onSend` hook lets a
+ * test inspect DB state at the instant the provider is invoked.
+ */
+class CountingNonIdempotentProvider implements ResetEmailProvider {
+  readonly supportsIdempotency = false;
+  sendCalls = 0;
+  onSend: () => Promise<void> = async () => {};
+  async send(_command: SendResetEmailCommand): Promise<SendResetEmailResult> {
+    this.sendCalls += 1;
+    await this.onSend();
+    return { providerMessageId: `smtp-${this.sendCalls}` };
+  }
+  get realDeliveries(): number {
+    return this.sendCalls;
+  }
+  reset(): void {
+    this.sendCalls = 0;
+    this.onSend = async () => {};
+  }
+}
+
+/**
  * Idempotent provider that runs a test hook DURING send() — used to simulate a
  * newer worker re-claiming the row while the current worker is mid-send, so the
  * current worker's fenced markDelivered later loses the race.
@@ -287,8 +311,11 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
       expect(claimB).not.toBeNull();
       expect(claimB!.deliveryClaimToken).not.toBe(claimA!.deliveryClaimToken);
 
-      // A returns late and tries to finalize with its STALE token — every
-      // finalizer must update zero rows.
+      // A returns late and tries to mutate with its STALE token — markSendStarted
+      // and every finalizer must update zero rows.
+      expect(
+        await ctx.resets.markSendStarted(id, claimA!.deliveryClaimToken, ctx.clock.now()),
+      ).toBe(0);
       expect(
         await ctx.resets.markDelivered(
           id,
@@ -299,6 +326,8 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
       ).toBe(0);
       expect(await ctx.resets.markFailed(id, claimA!.deliveryClaimToken, 'stale')).toBe(0);
       expect(await ctx.resets.markUnknown(id, claimA!.deliveryClaimToken, 'stale')).toBe(0);
+      // The stale markSendStarted left no mark on B's claim.
+      expect((await rowOf(ctx, id)).deliverySendStartedAt).toBeNull();
 
       // B's claim is untouched: still IN_PROGRESS, secret intact, B's token.
       const mid = await rowOf(ctx, id);
@@ -474,6 +503,159 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
     });
   });
 
+  // --- non-idempotent provider: crash AFTER the send started, BEFORE finalize -
+  describe('non-idempotent provider crash-after-send-started', () => {
+    const provider = new CountingNonIdempotentProvider();
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp({ emailProvider: provider });
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+      provider.reset();
+    });
+
+    it('leaves delivery_send_started_at NULL right after a claim', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(claim).not.toBeNull();
+
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('IN_PROGRESS');
+      // The provider has not been called yet, so no send-started mark exists.
+      expect(row.deliverySendStartedAt).toBeNull();
+      expect(provider.sendCalls).toBe(0);
+    });
+
+    it('stamps delivery_send_started_at BEFORE the provider send runs', async () => {
+      const id = await requestReset(ctx);
+      let stampedDuringSend: Date | null | undefined;
+      // Capture the persisted mark at the exact moment the provider is invoked.
+      provider.onSend = async () => {
+        stampedDuringSend = (await rowOf(ctx, id)).deliverySendStartedAt;
+      };
+
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(true);
+      // The mark was already committed by the time the provider ran.
+      expect(stampedDuringSend).toBeInstanceOf(Date);
+      expect((await rowOf(ctx, id)).deliverySendStartedAt).not.toBeNull();
+    });
+
+    it('re-claims after a crash BEFORE the send started (send_started_at still NULL)', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+      // Worker A claims and decrypts, then "crashes" before markSendStarted — the
+      // provider was never called.
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      ctx.deliveryCipher.decrypt(claim!.sealed);
+      expect((await rowOf(ctx, id)).deliverySendStartedAt).toBeNull();
+      expect(provider.sendCalls).toBe(0);
+
+      // Lease lapses → recovery re-claims (send never started) and sends ONCE.
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const retry = await ctx.delivery.deliver(id);
+      expect(retry.delivered).toBe(true);
+      expect(provider.sendCalls).toBe(1);
+      expect(provider.realDeliveries).toBe(1);
+      expect((await rowOf(ctx, id)).deliveryStatus).toBe('SUCCEEDED');
+    });
+
+    it('does NOT resend after a crash AFTER the send started → UNKNOWN, secret kept', async () => {
+      const id = await requestReset(ctx);
+      const now = ctx.clock.now();
+
+      // Worker A: claim, mark the send started, hand the message to SMTP (recorded
+      // as a real delivery)… then CRASH before markDelivered.
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      const token = ctx.deliveryCipher.decrypt(claim!.sealed);
+      expect(await ctx.resets.markSendStarted(id, claim!.deliveryClaimToken, ctx.clock.now())).toBe(
+        1,
+      );
+      await provider.send({
+        email: claim!.email,
+        token,
+        idempotencyKey: claim!.providerIdempotencyKey,
+      });
+      expect(provider.sendCalls).toBe(1);
+      expect(provider.realDeliveries).toBe(1);
+
+      // Crash state: IN_PROGRESS, send-started stamped, secret intact.
+      const crashed = await rowOf(ctx, id);
+      expect(crashed.deliveryStatus).toBe('IN_PROGRESS');
+      expect(crashed.deliverySendStartedAt).not.toBeNull();
+      expect(crashed.deliveryCiphertext).not.toBeNull();
+
+      // Lease lapses → recovery must NOT auto-resend; it quarantines as UNKNOWN.
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const recovery = await ctx.delivery.deliver(id);
+      expect(recovery.delivered).toBe(false);
+      expect(recovery).toMatchObject({ reason: 'unknown' });
+      // No SECOND SMTP call was made during recovery.
+      expect(provider.sendCalls).toBe(1);
+      expect(provider.realDeliveries).toBe(1);
+
+      const row = await rowOf(ctx, id);
+      // Quarantined for manual review; lease dropped; an error is recorded.
+      expect(row.deliveryStatus).toBe('UNKNOWN');
+      expect(row.deliveryLeaseUntil).toBeNull();
+      expect(row.deliveryLastError).toBeTruthy();
+      // Secret preserved (not erased) for the manual reviewer.
+      expect(row.deliveryCiphertext).not.toBeNull();
+      expect(row.deliveryNonce).not.toBeNull();
+      expect(row.deliveryAuthTag).not.toBeNull();
+
+      // It stays quarantined: a further attempt does nothing (no uncontrolled retry).
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const again = await ctx.delivery.deliver(id);
+      expect(again).toMatchObject({ delivered: false, reason: 'not_claimable' });
+      expect(provider.sendCalls).toBe(1);
+      expect((await rowOf(ctx, id)).deliveryStatus).toBe('UNKNOWN');
+    });
+
+    it('fences a stale worker out of markSendStarted after a re-claim', async () => {
+      const id = await requestReset(ctx);
+      const t0 = ctx.clock.now();
+      const a = await ctx.resets.claimForDelivery(
+        id,
+        t0,
+        new Date(t0.getTime() + DELIVERY_LEASE_MS),
+      );
+      // A's lease lapses; B re-claims (A never started a send, so send_started is NULL).
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const tB = ctx.clock.now();
+      const b = await ctx.resets.claimForDelivery(
+        id,
+        tB,
+        new Date(tB.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(b!.deliveryClaimToken).not.toBe(a!.deliveryClaimToken);
+
+      // Stale A cannot stamp send-started on B's claim.
+      expect(await ctx.resets.markSendStarted(id, a!.deliveryClaimToken, ctx.clock.now())).toBe(0);
+      expect((await rowOf(ctx, id)).deliverySendStartedAt).toBeNull();
+      // B (the live owner) can.
+      expect(await ctx.resets.markSendStarted(id, b!.deliveryClaimToken, ctx.clock.now())).toBe(1);
+      expect((await rowOf(ctx, id)).deliverySendStartedAt).not.toBeNull();
+    });
+  });
+
   // --- service returns claim_lost when superseded mid-send ------------------
   describe('service claim_lost on supersede', () => {
     const provider = new HookedDuringSendProvider();
@@ -493,7 +675,9 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
       const id = await requestReset(ctx);
 
       // While worker A is inside provider.send(), worker B steals the lapsed lease
-      // and re-claims, rotating the fencing token out from under A.
+      // and re-claims, rotating the fencing token out from under A. A already
+      // stamped delivery_send_started_at before sending, so B (an idempotent
+      // provider, which can safely re-send) must opt into reclaiming a started send.
       provider.hook = async () => {
         ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
         const now = ctx.clock.now();
@@ -501,6 +685,7 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
           id,
           now,
           new Date(now.getTime() + DELIVERY_LEASE_MS),
+          true,
         );
         expect(b).not.toBeNull();
       };
