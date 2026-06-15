@@ -452,8 +452,12 @@ model UserRole {
 
   // Composite FKs pin both endpoints to the SAME company. `companyId` is the
   // shared key, so user, role and assignment can never straddle two tenants.
-  user       User  @relation("UserRoleUser", fields: [userId, companyId], references: [id, companyId], onDelete: Cascade)
-  role       Role  @relation(fields: [roleId, companyId], references: [id, companyId], onDelete: Cascade)
+  // onDelete: Restrict (RBAC-TI-002): deleting a user/role that still owns
+  // assignments is REFUSED by PostgreSQL rather than silently cascading away the
+  // authorization state. The assignment must be removed first (auditable). See
+  // migration 20260616020000_rbac_user_roles_delete_restrict.
+  user       User  @relation("UserRoleUser", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
+  role       Role  @relation(fields: [roleId, companyId], references: [id, companyId], onDelete: Restrict)
   assignedBy User? @relation("UserRoleAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
 
   // PK (user_id, role_id) already forbids a duplicate user-role-company row.

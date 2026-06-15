@@ -133,6 +133,11 @@ async function main() {
     'effect_receipts_outbox_event_id_fkey',
     'invoices_company_id_fkey',
     'import_jobs_company_id_fkey',
+    // RBAC-TI-002: the user_roles composite FKs must NOT cascade — a hard delete
+    // of a user/role that still owns assignments is refused, never silently
+    // erased (migration 20260616020000_rbac_user_roles_delete_restrict).
+    'user_roles_user_id_company_id_fkey',
+    'user_roles_role_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
