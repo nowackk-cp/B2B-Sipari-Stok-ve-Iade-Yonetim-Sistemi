@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import type { INestApplication } from '@nestjs/common';
+import type { INestApplication, ModuleMetadata, Type } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { argon2id } from 'hash-wasm';
-import { PrismaClient, type Prisma } from '@b2b/database';
+import { PrismaClient, type Prisma, seed } from '@b2b/database';
+import { ROLES, type RoleName } from '@b2b/domain';
 import { AppModule } from '../../src/app.module';
+import { PERMISSION_CACHE } from '../../src/modules/authorization/authorization.constants';
+import type { PermissionCache } from '../../src/modules/authorization/ports/permission-cache.port';
 import { AppConfigService } from '../../src/common/config/app-config.service';
 import { configureApp } from '../../src/bootstrap';
 import { CLOCK, type Clock } from '../../src/common/time/clock';
@@ -106,6 +109,8 @@ export interface TestApp {
   deliveryCipher: PasswordResetDeliveryCipher;
   /** The reset email provider actually bound in the app (the test fake by default). */
   emailProvider: ResetEmailProvider;
+  /** The effective-permission cache bound in the app (in-memory by default). */
+  permissionCache: PermissionCache;
 }
 
 export interface CreateTestAppOptions {
@@ -116,6 +121,10 @@ export interface CreateTestAppOptions {
    * only to assert production wiring; do NOT drive deliveries with it (no relay).
    */
   keepRealEmailProvider?: boolean;
+  /** Extra test-only controllers to register (e.g. the authz test controller). */
+  controllers?: Type[];
+  /** Extra modules to import so the controllers' guards resolve their providers. */
+  imports?: ModuleMetadata['imports'];
 }
 
 /**
@@ -128,7 +137,10 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
   const clock = new MutableClock();
   const email = new CapturingEmailOutbox();
 
-  let builder = Test.createTestingModule({ imports: [AppModule] })
+  let builder = Test.createTestingModule({
+    imports: [AppModule, ...(opts.imports ?? [])],
+    controllers: opts.controllers ?? [],
+  })
     .overrideProvider(CLOCK)
     .useValue(clock)
     .overrideProvider(RATE_LIMITER)
@@ -156,6 +168,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
   const resets = app.get(PasswordResetRepository);
   const deliveryCipher = app.get(PasswordResetDeliveryCipher);
   const emailProvider = app.get<ResetEmailProvider>(RESET_EMAIL_PROVIDER);
+  const permissionCache = app.get<PermissionCache>(PERMISSION_CACHE);
   return {
     app,
     http: app.getHttpServer(),
@@ -167,6 +180,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     resets,
     deliveryCipher,
     emailProvider,
+    permissionCache,
   };
 }
 
@@ -192,12 +206,87 @@ export async function closeTestApp(ctx: TestApp): Promise<void> {
   await ctx.app.close();
 }
 
-/** Per-test isolation: truncate the DB, clear rate-limit + captured emails. */
+/** Per-test isolation: truncate the DB, clear rate-limit + captured emails +
+ * the permission cache. */
 export async function resetState(ctx: TestApp): Promise<void> {
   await resetDatabase(ctx.prisma);
   ctx.rateLimiter.clearAll();
   ctx.email.events.length = 0;
+  await ctx.permissionCache.clear();
 }
+
+/**
+ * Seed the canonical RBAC catalog (permissions, system roles and the
+ * role→permission matrix from `@b2b/domain`) into the freshly-truncated test DB.
+ * Idempotent; uses the same production seed so role permission sets (e.g. VIEWER
+ * = read-only) are authoritative rather than hand-mirrored in the test.
+ */
+export async function seedRbac(prisma: PrismaClient): Promise<void> {
+  await seed(prisma, {
+    ...process.env,
+    BOOTSTRAP_ADMIN_EMAIL: '',
+    BOOTSTRAP_ADMIN_PASSWORD_HASH: '',
+  });
+}
+
+/** Assign a seeded system role (by name) to a user. */
+export async function assignRole(
+  prisma: PrismaClient,
+  userId: bigint,
+  roleName: RoleName,
+): Promise<void> {
+  const role = await prisma.role.findUniqueOrThrow({ where: { name: roleName } });
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId, roleId: role.id } },
+    update: {},
+    create: { userId, roleId: role.id },
+  });
+}
+
+let customRoleSeq = 0;
+
+/**
+ * Create a uniquely-named non-system role granting exactly `permissionCodes`
+ * (which must already be seeded) and assign it to `userId`. Gives tests precise
+ * control over a user's effective permissions (merge, partial, duplicate cases).
+ */
+export async function grantPermissionsViaRole(
+  prisma: PrismaClient,
+  userId: bigint,
+  permissionCodes: string[],
+  roleName?: string,
+): Promise<void> {
+  customRoleSeq += 1;
+  const name = roleName ?? `TEST_ROLE_${Date.now().toString(36)}_${customRoleSeq}`;
+  const role = await prisma.role.create({ data: { name, privilegeLevel: 5 } });
+  const perms = await prisma.permission.findMany({
+    where: { code: { in: permissionCodes } },
+    select: { id: true },
+  });
+  await prisma.rolePermission.createMany({
+    data: perms.map((p) => ({ roleId: role.id, permissionId: p.id })),
+    skipDuplicates: true,
+  });
+  await prisma.userRole.create({ data: { userId, roleId: role.id } });
+}
+
+/** Add a single permission to an existing role (no role-membership change) —
+ * used to prove the permission cache must be invalidated to see the change. */
+export async function addPermissionToRole(
+  prisma: PrismaClient,
+  roleName: string,
+  permissionCode: string,
+): Promise<void> {
+  const role = await prisma.role.findUniqueOrThrow({ where: { name: roleName } });
+  const perm = await prisma.permission.findUniqueOrThrow({ where: { code: permissionCode } });
+  await prisma.rolePermission.upsert({
+    where: { roleId_permissionId: { roleId: role.id, permissionId: perm.id } },
+    update: {},
+    create: { roleId: role.id, permissionId: perm.id },
+  });
+}
+
+export { ROLES };
 
 let userSeq = 0;
 

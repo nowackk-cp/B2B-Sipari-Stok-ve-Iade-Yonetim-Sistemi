@@ -10,6 +10,7 @@ import { TimeModule } from './common/time/time.module';
 import { AuditModule } from './common/audit/audit.module';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { AuthorizationModule } from './modules/authorization/authorization.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AuthModule } from './modules/auth/auth.module';
     AuditModule,
     HealthModule,
     AuthModule,
+    AuthorizationModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
