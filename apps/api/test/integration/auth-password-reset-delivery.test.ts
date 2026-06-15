@@ -7,6 +7,8 @@ import type {
   SendResetEmailCommand,
   SendResetEmailResult,
 } from '../../src/modules/security/ports/reset-email-provider.port';
+import { SmtpResetEmailProvider } from '../../src/modules/security/adapters/smtp-reset-email-provider';
+import { FakeResetEmailProvider } from '../support/fake-reset-email-provider';
 
 const BASE = '/api/v1/auth';
 
@@ -78,7 +80,58 @@ class HookedDuringSendProvider implements ResetEmailProvider {
 }
 
 describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
-  // --- default (idempotent placeholder) provider --------------------------
+  // --- production wiring binds the REAL SMTP provider, never a fake ----------
+  describe('production provider wiring', () => {
+    it('binds the real SmtpResetEmailProvider (no logging/fake placeholder)', async () => {
+      const ctx = await createTestApp({ keepRealEmailProvider: true });
+      try {
+        expect(ctx.emailProvider).toBeInstanceOf(SmtpResetEmailProvider);
+        expect(ctx.emailProvider).not.toBeInstanceOf(FakeResetEmailProvider);
+        // SMTP cannot dedup — the real provider must say so honestly.
+        expect(ctx.emailProvider.supportsIdempotency).toBe(false);
+      } finally {
+        await closeTestApp(ctx);
+      }
+    });
+  });
+
+  // --- a delivery is proven ONLY by the fake provider's recorded store -------
+  describe('recorded delivery (test fake)', () => {
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp();
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+      (ctx.emailProvider as FakeResetEmailProvider).reset();
+    });
+
+    it('records the real recipient + token and only then erases the secret', async () => {
+      const id = await requestReset(ctx);
+      const fake = ctx.emailProvider as FakeResetEmailProvider;
+
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(true);
+
+      // The claim that a delivery happened rests on the fake's record, not on a
+      // fabricated status.
+      expect(fake.sent).toHaveLength(1);
+      const sent = fake.last();
+      const row = await rowOf(ctx, id);
+      expect(sent.email).toBe((await ctx.prisma.user.findFirstOrThrow()).email);
+      expect(sent.token).toBeTruthy();
+      expect(sent.idempotencyKey).toBe(`password-reset:${id}`);
+      // Secret erased only after the provider recorded the send.
+      expect(row.deliveryStatus).toBe('SUCCEEDED');
+      expect(row.providerMessageId).toBe(sent.providerMessageId);
+      expect(row.deliveryCiphertext).toBeNull();
+    });
+  });
+
+  // --- default (test fake) provider lifecycle -----------------------------
   describe('claim + lease lifecycle', () => {
     let ctx: TestApp;
     beforeAll(async () => {

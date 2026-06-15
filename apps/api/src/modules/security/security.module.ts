@@ -5,7 +5,7 @@ import { PasswordResetService } from './password-reset.service';
 import { PasswordResetDeliveryCipher } from './password-reset-delivery.cipher';
 import { PasswordResetDeliveryService } from './password-reset-delivery.service';
 import { RESET_EMAIL_PROVIDER } from './ports/reset-email-provider.port';
-import { LoggingResetEmailProvider } from './adapters/logging-reset-email-provider';
+import { SmtpResetEmailProvider } from './adapters/smtp-reset-email-provider';
 
 /**
  * Security module — password-reset token lifecycle. Owns
@@ -14,6 +14,11 @@ import { LoggingResetEmailProvider } from './adapters/logging-reset-email-provid
  * {@link PasswordResetDeliveryService} mail-delivery boundary (AUTH-BLOCK-001).
  * Adapters (token generator, email outbox, clock) come from the global
  * AuthAdaptersModule / TimeModule.
+ *
+ * The reset email goes out over a real SMTP relay ({@link SmtpResetEmailProvider}).
+ * There is deliberately NO fake/logging fallback in this wiring: a delivery is
+ * only ever marked `SUCCEEDED` (and the secret erased) after the relay accepts
+ * the message. Tests inject a test-only fake via DI override.
  */
 @Module({
   imports: [IdentityModule],
@@ -22,7 +27,7 @@ import { LoggingResetEmailProvider } from './adapters/logging-reset-email-provid
     PasswordResetService,
     PasswordResetDeliveryCipher,
     PasswordResetDeliveryService,
-    { provide: RESET_EMAIL_PROVIDER, useClass: LoggingResetEmailProvider },
+    { provide: RESET_EMAIL_PROVIDER, useClass: SmtpResetEmailProvider },
   ],
   exports: [PasswordResetService, PasswordResetDeliveryService],
 })

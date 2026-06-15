@@ -61,6 +61,11 @@ export const storageEnvSchema = z.object({
 });
 
 // --- Group: mail -------------------------------------------------------------
+// In development/test the defaults target Mailpit (an unauthenticated local
+// relay), so SMTP_USER/SMTP_PASSWORD are optional. Production is held to a
+// stricter bar via {@link requireProductionMail}: a real reset email must go
+// through an authenticated relay, so a deployment that forgets the credentials
+// fails fast at boot instead of silently dropping password-reset mail.
 export const mailEnvSchema = z.object({
   SMTP_HOST: z.string().min(1),
   SMTP_PORT: port.default(1025),
@@ -69,6 +74,29 @@ export const mailEnvSchema = z.object({
   SMTP_SECURE: booleanFromString.default(false),
   MAIL_FROM: z.string().min(1).default('B2B Operations <no-reply@b2bops.local>'),
 });
+
+/**
+ * Cross-field rule: in production the SMTP credentials that authenticate the real
+ * mail relay are mandatory. Dev/test may run against Mailpit without auth, but a
+ * production boot with a missing `SMTP_USER`/`SMTP_PASSWORD` must not start — the
+ * reset-email provider would otherwise have no authenticated transport.
+ */
+function requireProductionMail(
+  cfg: { NODE_ENV: string; SMTP_USER?: string; SMTP_PASSWORD?: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (cfg.NODE_ENV !== 'production') return;
+  for (const key of ['SMTP_USER', 'SMTP_PASSWORD'] as const) {
+    const value = cfg[key];
+    if (value === undefined || value.trim() === '') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is required in production`,
+      });
+    }
+  }
+}
 
 // --- Group: api --------------------------------------------------------------
 export const apiEnvSchema = z.object({
@@ -157,14 +185,16 @@ export const apiConfigSchema = commonEnvSchema
   .merge(storageEnvSchema)
   .merge(mailEnvSchema)
   .merge(apiEnvSchema)
-  .merge(authEnvSchema);
+  .merge(authEnvSchema)
+  .superRefine(requireProductionMail);
 
 export const workerConfigSchema = commonEnvSchema
   .merge(postgresEnvSchema)
   .merge(redisEnvSchema)
   .merge(storageEnvSchema)
   .merge(mailEnvSchema)
-  .merge(workerEnvSchema);
+  .merge(workerEnvSchema)
+  .superRefine(requireProductionMail);
 
 export const webConfigSchema = commonEnvSchema.merge(webEnvSchema);
 

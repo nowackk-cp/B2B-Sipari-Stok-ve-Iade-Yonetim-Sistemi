@@ -20,6 +20,7 @@ import {
   RESET_EMAIL_PROVIDER,
   type ResetEmailProvider,
 } from '../../src/modules/security/ports/reset-email-provider.port';
+import { FakeResetEmailProvider } from '../support/fake-reset-email-provider';
 
 /**
  * Truncate every application table so each test starts clean. Guarded against
@@ -103,11 +104,18 @@ export interface TestApp {
   resets: PasswordResetRepository;
   /** The delivery cipher, for tests that decrypt a claimed secret in memory. */
   deliveryCipher: PasswordResetDeliveryCipher;
+  /** The reset email provider actually bound in the app (the test fake by default). */
+  emailProvider: ResetEmailProvider;
 }
 
 export interface CreateTestAppOptions {
   /** Override the password-reset email provider (e.g. a counting/failing fake). */
   emailProvider?: ResetEmailProvider;
+  /**
+   * Keep the real production provider (SMTP) bound instead of the test fake. Used
+   * only to assert production wiring; do NOT drive deliveries with it (no relay).
+   */
+  keepRealEmailProvider?: boolean;
 }
 
 /**
@@ -127,8 +135,12 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     .useClass(InMemoryRateLimiter)
     .overrideProvider(EMAIL_OUTBOX)
     .useValue(email);
-  if (opts.emailProvider) {
-    builder = builder.overrideProvider(RESET_EMAIL_PROVIDER).useValue(opts.emailProvider);
+  // Default to a test-only fake so deliveries never hit a real SMTP relay. The
+  // real SmtpResetEmailProvider stays bound only when a test explicitly asks
+  // (keepRealEmailProvider) to assert production wiring.
+  if (!opts.keepRealEmailProvider) {
+    const provider = opts.emailProvider ?? new FakeResetEmailProvider();
+    builder = builder.overrideProvider(RESET_EMAIL_PROVIDER).useValue(provider);
   }
   const moduleRef = await builder.compile();
 
@@ -143,6 +155,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
   const delivery = app.get(PasswordResetDeliveryService);
   const resets = app.get(PasswordResetRepository);
   const deliveryCipher = app.get(PasswordResetDeliveryCipher);
+  const emailProvider = app.get<ResetEmailProvider>(RESET_EMAIL_PROVIDER);
   return {
     app,
     http: app.getHttpServer(),
@@ -153,6 +166,7 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
     delivery,
     resets,
     deliveryCipher,
+    emailProvider,
   };
 }
 

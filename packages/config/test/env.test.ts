@@ -23,6 +23,7 @@ const validApiEnv = {
   API_CORS_ORIGINS: 'http://localhost:3000, http://localhost:3002',
   SWAGGER_ENABLED: 'true',
   JWT_ACCESS_SECRET: 'test-only-access-secret-at-least-32-characters-long',
+  PASSWORD_RESET_DELIVERY_KEY: 'test-only-reset-delivery-key-at-least-32-bytes-long',
 } satisfies Record<string, string>;
 
 describe('config / api', () => {
@@ -66,6 +67,36 @@ describe('config / api', () => {
     expect(() =>
       loadApiConfig({ ...validApiEnv, DATABASE_URL: 'mysql://localhost/db' }),
     ).toThrowError(/DATABASE_URL/);
+  });
+
+  it('allows unauthenticated SMTP outside production (Mailpit dev default)', () => {
+    const cfg = loadApiConfig({ ...validApiEnv, NODE_ENV: 'development' });
+    expect(cfg.SMTP_USER).toBeUndefined();
+    expect(cfg.SMTP_PASSWORD).toBeUndefined();
+  });
+
+  it('fails fast in production when SMTP credentials are missing (real provider config absent)', () => {
+    const prodEnv = { ...validApiEnv, NODE_ENV: 'production' };
+    expect(() => loadApiConfig(prodEnv)).toThrowError(EnvValidationError);
+    try {
+      loadApiConfig(prodEnv);
+    } catch (err) {
+      const issues = (err as EnvValidationError).issues;
+      expect(issues.some((i) => i.path === 'SMTP_USER')).toBe(true);
+      expect(issues.some((i) => i.path === 'SMTP_PASSWORD')).toBe(true);
+    }
+  });
+
+  it('accepts a production environment once SMTP credentials are provided', () => {
+    const cfg = loadApiConfig({
+      ...validApiEnv,
+      NODE_ENV: 'production',
+      SMTP_USER: 'relay-user',
+      SMTP_PASSWORD: 'relay-secret',
+    });
+    expect(cfg.NODE_ENV).toBe('production');
+    expect(cfg.SMTP_USER).toBe('relay-user');
+    expect(cfg.SMTP_PASSWORD).toBe('relay-secret');
   });
 });
 

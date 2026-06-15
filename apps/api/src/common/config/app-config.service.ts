@@ -39,6 +39,36 @@ export class AppConfigService {
     return this.config.SWAGGER_ENABLED;
   }
 
+  // --- mail (outbound SMTP) --------------------------------------------------
+  /** SMTP transport settings for the real mail provider. `user`/`password` are
+   * undefined for an unauthenticated dev relay (Mailpit); production validation
+   * makes them mandatory ({@link requireProductionMail}). */
+  get mail(): {
+    host: string;
+    port: number;
+    secure: boolean;
+    user: string | undefined;
+    password: string | undefined;
+    from: string;
+  } {
+    return {
+      host: this.config.SMTP_HOST,
+      port: this.config.SMTP_PORT,
+      secure: this.config.SMTP_SECURE,
+      user: this.config.SMTP_USER,
+      password: this.config.SMTP_PASSWORD,
+      from: this.config.MAIL_FROM,
+    };
+  }
+
+  /** Base URL the password-reset link points at (the browser app origin). Derived
+   * from the first configured CORS origin; the raw token is appended only in
+   * memory while the email body is built, never here. */
+  get passwordResetLinkBase(): string {
+    const origin = this.config.API_CORS_ORIGINS[0] ?? 'http://localhost:3000';
+    return `${origin.replace(/\/+$/, '')}/reset-password`;
+  }
+
   // --- auth: access token ----------------------------------------------------
   get jwtAccessSecret(): string {
     return this.config.JWT_ACCESS_SECRET;
