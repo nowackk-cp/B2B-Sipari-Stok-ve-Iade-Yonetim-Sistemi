@@ -95,7 +95,17 @@ describe('billing — invoice series & numbering', () => {
           });
           return number;
         },
-        {},
+        // These three transactions intentionally contend on the same row lock,
+        // so the runners-up sit blocked on `SELECT ... FOR UPDATE` until the
+        // holder commits. Prisma's default interactive-transaction maxWait
+        // (2000 ms) measures from the `$transaction` call, not from when the
+        // lock is acquired, so under full-gate load a queued allocation can
+        // exhaust it before its turn and fail with "Unable to start a
+        // transaction in the given time" (P2028). Widen maxWait/timeout so the
+        // serialization is bounded by the row lock — what this test proves —
+        // and never by the transaction-start clock. This relaxes no assertion
+        // and changes no locking behaviour.
+        { maxWait: 15_000, timeout: 20_000 },
         prisma,
       );
     }
