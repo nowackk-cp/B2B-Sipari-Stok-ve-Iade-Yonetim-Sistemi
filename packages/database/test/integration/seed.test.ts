@@ -45,11 +45,13 @@ describe('seed (idempotent system seed)', () => {
 
   it('preserves protected/system flags on roles', async () => {
     await seed(prisma, {});
-    const systemAdmin = await prisma.role.findUnique({ where: { name: ROLES.SYSTEM_ADMIN } });
+    // Roles are company-scoped: look them up within the seeded default company.
+    const systemAdmin = await prisma.role.findFirst({ where: { name: ROLES.SYSTEM_ADMIN } });
     expect(systemAdmin?.isProtected).toBe(true);
     expect(systemAdmin?.isSystem).toBe(true);
     expect(systemAdmin?.privilegeLevel).toBe(100);
-    const admin = await prisma.role.findUnique({ where: { name: ROLES.ADMIN } });
+    expect(typeof systemAdmin?.companyId).toBe('bigint');
+    const admin = await prisma.role.findFirst({ where: { name: ROLES.ADMIN } });
     expect(admin?.isProtected).toBe(false);
     expect(admin?.privilegeLevel).toBe(50);
   });

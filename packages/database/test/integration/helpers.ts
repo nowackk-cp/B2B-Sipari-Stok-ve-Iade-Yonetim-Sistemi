@@ -21,11 +21,15 @@ export function createPrisma(): PrismaClient {
 
 export async function makeUser(
   prisma: PrismaClient,
-  over: Partial<{ email: string; fullName: string }> = {},
+  over: Partial<{ email: string; fullName: string; companyId: bigint }> = {},
 ) {
   const s = uniqueSuffix();
+  // Users are company-scoped (company_id NOT NULL). Attach a fresh tenant unless
+  // the caller pins one, so factory users never collide on company.
+  const companyId = over.companyId ?? (await makeCompany(prisma)).id;
   return prisma.user.create({
     data: {
+      companyId,
       email: over.email ?? `user_${s}@test.local`,
       passwordHash: 'x',
       fullName: over.fullName ?? `User ${s}`,

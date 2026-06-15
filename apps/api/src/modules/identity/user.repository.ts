@@ -7,6 +7,8 @@ import { PrismaService } from '../../common/database/prisma.service';
 export interface AuthUser {
   id: bigint;
   publicId: string;
+  /** Owning tenant, read from PostgreSQL (never trusted from a JWT claim). */
+  companyId: bigint;
   email: string;
   passwordHash: string;
   fullName: string;
@@ -27,6 +29,7 @@ const USER_WITH_ROLES = {
 interface UserRow {
   id: bigint;
   publicId: string;
+  companyId: bigint;
   email: string;
   passwordHash: string;
   fullName: string;

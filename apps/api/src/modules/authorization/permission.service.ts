@@ -7,6 +7,12 @@ import { PermissionRepository } from './permission.repository';
 /** The subset of an authenticated principal the permission loader needs. */
 export interface PermissionSubject {
   userId: bigint;
+  /**
+   * Owning tenant — the user's REAL company id from PostgreSQL (never a JWT
+   * claim). Permissions resolve only through same-company roles, and the cache
+   * key is partitioned by it, so a forged token company cannot leak grants.
+   */
+  companyId: bigint;
   /** Current role names (loaded fresh from the DB by the auth guard). */
   roles: string[];
 }
@@ -40,12 +46,12 @@ export class PermissionService {
   /** Effective permission codes for the subject (cached; PostgreSQL on miss). */
   async getEffectivePermissions(subject: PermissionSubject): Promise<ReadonlySet<string>> {
     const version = this.securityVersion(subject.roles);
-    const cached = await this.cache.get(subject.userId, version);
+    const cached = await this.cache.get(subject.companyId, subject.userId, version);
     if (cached) return cached;
 
-    const codes = await this.repo.loadEffectivePermissionCodes(subject.userId);
+    const codes = await this.repo.loadEffectivePermissionCodes(subject.userId, subject.companyId);
     const permissions = new Set(codes);
-    await this.cache.set(subject.userId, version, permissions);
+    await this.cache.set(subject.companyId, subject.userId, version, permissions);
     return permissions;
   }
 

@@ -116,7 +116,11 @@ describe('PermissionGuard (integration, real PostgreSQL)', () => {
       .expect(200);
 
     const service = ctx.app.get(PermissionService);
-    const effective = await service.getEffectivePermissions({ userId: user.id, roles: [] });
+    const effective = await service.getEffectivePermissions({
+      userId: user.id,
+      companyId: user.companyId,
+      roles: [],
+    });
     expect([...effective].filter((c) => c === 'product:read')).toHaveLength(1);
   });
 
@@ -137,7 +141,11 @@ describe('PermissionGuard (integration, real PostgreSQL)', () => {
       .expect(401);
     // And the effective-permission read model returns nothing for a disabled user.
     const service = ctx.app.get(PermissionService);
-    const effective = await service.getEffectivePermissions({ userId: user.id, roles: [] });
+    const effective = await service.getEffectivePermissions({
+      userId: user.id,
+      companyId: user.companyId,
+      roles: [],
+    });
     expect(effective.size).toBe(0);
   });
 
@@ -184,7 +192,11 @@ describe('PermissionGuard (integration, real PostgreSQL)', () => {
       .expect(403);
 
     const service = ctx.app.get(PermissionService);
-    const effective = await service.getEffectivePermissions({ userId: user.id, roles: [] });
+    const effective = await service.getEffectivePermissions({
+      userId: user.id,
+      companyId: user.companyId,
+      roles: [],
+    });
     expect([...effective].sort()).toEqual([...ROLE_PERMISSION_MATRIX[ROLES.VIEWER]].sort());
   });
 

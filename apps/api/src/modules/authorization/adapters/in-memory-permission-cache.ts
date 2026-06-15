@@ -27,31 +27,46 @@ export class InMemoryPermissionCache implements PermissionCache {
 
   constructor(@Inject(CLOCK) private readonly clock: Clock) {}
 
-  private key(userId: bigint, version: string): string {
-    return `${userId.toString()}:${version}`;
+  // Tenant-isolated key: companyId FIRST so the same numeric userId in two
+  // companies maps to two distinct entries (no cross-tenant collision).
+  private key(companyId: bigint, userId: bigint, version: string): string {
+    return `${companyId.toString()}:${userId.toString()}:${version}`;
   }
 
-  async get(userId: bigint, version: string): Promise<ReadonlySet<string> | null> {
-    const entry = this.entries.get(this.key(userId, version));
+  async get(
+    companyId: bigint,
+    userId: bigint,
+    version: string,
+  ): Promise<ReadonlySet<string> | null> {
+    const k = this.key(companyId, userId, version);
+    const entry = this.entries.get(k);
     if (!entry) return null;
     if (entry.expiresAtMs <= this.clock.now().getTime()) {
-      this.entries.delete(this.key(userId, version));
+      this.entries.delete(k);
       return null;
     }
     return entry.permissions;
   }
 
-  async set(userId: bigint, version: string, permissions: ReadonlySet<string>): Promise<void> {
-    this.entries.set(this.key(userId, version), {
+  async set(
+    companyId: bigint,
+    userId: bigint,
+    version: string,
+    permissions: ReadonlySet<string>,
+  ): Promise<void> {
+    this.entries.set(this.key(companyId, userId, version), {
       expiresAtMs: this.clock.now().getTime() + PERMISSION_CACHE_TTL_MS,
       permissions,
     });
   }
 
   async invalidate(userId: bigint): Promise<void> {
-    const prefix = `${userId.toString()}:`;
+    // Keys are `companyId:userId:version`; a user belongs to exactly one company,
+    // so match on the userId segment to drop all of that user's entries. The
+    // invalidation policy (drop everything for a user) is unchanged.
+    const needle = `:${userId.toString()}:`;
     for (const key of this.entries.keys()) {
-      if (key.startsWith(prefix)) this.entries.delete(key);
+      if (key.includes(needle)) this.entries.delete(key);
     }
   }
 

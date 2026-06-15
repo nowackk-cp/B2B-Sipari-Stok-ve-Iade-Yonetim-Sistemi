@@ -6,6 +6,12 @@
 export interface AuthPrincipal {
   /** Internal user PK (for service/data operations). */
   userId: bigint;
+  /**
+   * Owning tenant, resolved from PostgreSQL by the auth guard — NEVER from a JWT
+   * claim. Authorization scopes a user's effective permissions to this company,
+   * so a forged `companyId` in a token cannot reach another tenant's grants.
+   */
+  companyId: bigint;
   /** Public user UUID (safe to surface). */
   userPublicId: string;
   /** Public session id this access token is bound to. */

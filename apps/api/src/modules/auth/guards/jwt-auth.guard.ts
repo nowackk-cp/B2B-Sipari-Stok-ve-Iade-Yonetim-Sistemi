@@ -69,6 +69,8 @@ export class JwtAuthGuard implements CanActivate {
 
     const principal: AuthPrincipal = {
       userId: user.id,
+      // Tenant comes from the DB user record, not the token (tenant isolation).
+      companyId: user.companyId,
       userPublicId: user.publicId,
       sessionId: claims.sid,
       email: user.email,

@@ -55,7 +55,7 @@ export class PermissionGuard implements CanActivate {
     if (!principal) throw new UnauthorizedException('Authentication required');
 
     const granted = await this.permissions.hasAllPermissions(
-      { userId: principal.userId, roles: principal.roles },
+      { userId: principal.userId, companyId: principal.companyId, roles: principal.roles },
       required,
     );
     if (!granted) throw new ForbiddenException('Insufficient permissions');

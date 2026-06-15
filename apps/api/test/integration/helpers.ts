@@ -229,26 +229,60 @@ export async function seedRbac(prisma: PrismaClient): Promise<void> {
   });
 }
 
-/** Assign a seeded system role (by name) to a user. */
+/** Canonical default test tenant (mirrors the seed's "Default Company"). */
+export const DEFAULT_COMPANY_NAME = 'Default Company';
+
+/** Find-or-create the default tenant so users and seeded roles share a company. */
+export async function ensureDefaultCompany(prisma: PrismaClient): Promise<bigint> {
+  const existing = await prisma.company.findFirst({ where: { name: DEFAULT_COMPANY_NAME } });
+  if (existing) return existing.id;
+  const created = await prisma.company.create({ data: { name: DEFAULT_COMPANY_NAME } });
+  return created.id;
+}
+
+let companySeq = 0;
+
+/** Create a standalone tenant (for cross-company isolation tests). */
+export async function createCompany(prisma: PrismaClient, name?: string): Promise<bigint> {
+  companySeq += 1;
+  const company = await prisma.company.create({
+    data: { name: name ?? `Company ${Date.now().toString(36)}_${companySeq}` },
+  });
+  return company.id;
+}
+
+/** The user's owning tenant (company-scoped RBAC needs it for role lookups). */
+async function companyOf(prisma: PrismaClient, userId: bigint): Promise<bigint> {
+  const u = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { companyId: true },
+  });
+  return u.companyId;
+}
+
+/** Assign a seeded system role (by name, WITHIN the user's company) to a user. */
 export async function assignRole(
   prisma: PrismaClient,
   userId: bigint,
   roleName: RoleName,
 ): Promise<void> {
-  const role = await prisma.role.findUniqueOrThrow({ where: { name: roleName } });
+  const companyId = await companyOf(prisma, userId);
+  const role = await prisma.role.findUniqueOrThrow({
+    where: { companyId_name: { companyId, name: roleName } },
+  });
   await prisma.userRole.upsert({
     where: { userId_roleId: { userId, roleId: role.id } },
     update: {},
-    create: { userId, roleId: role.id },
+    create: { userId, roleId: role.id, companyId },
   });
 }
 
 let customRoleSeq = 0;
 
 /**
- * Create a uniquely-named non-system role granting exactly `permissionCodes`
- * (which must already be seeded) and assign it to `userId`. Gives tests precise
- * control over a user's effective permissions (merge, partial, duplicate cases).
+ * Create a uniquely-named non-system role (in the user's company) granting
+ * exactly `permissionCodes` (which must already be seeded) and assign it to
+ * `userId`. Gives tests precise control over effective permissions.
  */
 export async function grantPermissionsViaRole(
   prisma: PrismaClient,
@@ -256,9 +290,10 @@ export async function grantPermissionsViaRole(
   permissionCodes: string[],
   roleName?: string,
 ): Promise<void> {
+  const companyId = await companyOf(prisma, userId);
   customRoleSeq += 1;
   const name = roleName ?? `TEST_ROLE_${Date.now().toString(36)}_${customRoleSeq}`;
-  const role = await prisma.role.create({ data: { name, privilegeLevel: 5 } });
+  const role = await prisma.role.create({ data: { companyId, name, privilegeLevel: 5 } });
   const perms = await prisma.permission.findMany({
     where: { code: { in: permissionCodes } },
     select: { id: true },
@@ -267,7 +302,7 @@ export async function grantPermissionsViaRole(
     data: perms.map((p) => ({ roleId: role.id, permissionId: p.id })),
     skipDuplicates: true,
   });
-  await prisma.userRole.create({ data: { userId, roleId: role.id } });
+  await prisma.userRole.create({ data: { userId, roleId: role.id, companyId } });
 }
 
 /** Add a single permission to an existing role (no role-membership change) —
@@ -277,7 +312,7 @@ export async function addPermissionToRole(
   roleName: string,
   permissionCode: string,
 ): Promise<void> {
-  const role = await prisma.role.findUniqueOrThrow({ where: { name: roleName } });
+  const role = await prisma.role.findFirstOrThrow({ where: { name: roleName } });
   const perm = await prisma.permission.findUniqueOrThrow({ where: { code: permissionCode } });
   await prisma.rolePermission.upsert({
     where: { roleId_permissionId: { roleId: role.id, permissionId: perm.id } },
@@ -323,31 +358,40 @@ export function refreshCookieCleared(res: { headers: Record<string, unknown> }):
 export interface CreatedUser {
   id: bigint;
   publicId: string;
+  companyId: bigint;
   email: string;
   password: string;
 }
 
-/** Create an active (or overridden) user with a known password. */
+/**
+ * Create an active (or overridden) user with a known password. Users are
+ * company-scoped; unless a `companyId` is pinned the user joins the default test
+ * tenant (the same company the seed creates its roles in), so `assignRole` finds
+ * a same-company role.
+ */
 export async function createUser(
   prisma: PrismaClient,
   over: Partial<{
     email: string;
     password: string;
     status: 'ACTIVE' | 'SUSPENDED' | 'INVITED';
+    companyId: bigint;
   }> = {},
 ): Promise<CreatedUser> {
   userSeq += 1;
   const email = over.email ?? `user_${Date.now().toString(36)}_${userSeq}@test.local`;
   const password = over.password ?? 'correct horse battery staple';
+  const companyId = over.companyId ?? (await ensureDefaultCompany(prisma));
   const user = await prisma.user.create({
     data: {
+      companyId,
       email,
       passwordHash: await hashPassword(password),
       fullName: `Test User ${userSeq}`,
       status: over.status ?? 'ACTIVE',
       passwordChangedAt: new Date(),
     },
-    select: { id: true, publicId: true, email: true },
+    select: { id: true, publicId: true, companyId: true, email: true },
   });
   return { ...user, password };
 }

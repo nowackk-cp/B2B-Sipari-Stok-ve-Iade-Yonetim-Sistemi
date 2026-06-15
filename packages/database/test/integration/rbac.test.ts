@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { resetDatabase } from '../../src/testing';
-import { createPrisma, makeUser, makeWarehouse } from './helpers';
+import { createPrisma, makeCompany, makeUser, makeWarehouse } from './helpers';
 
 describe('RBAC persistence', () => {
   let prisma: PrismaClient;
@@ -18,15 +18,24 @@ describe('RBAC persistence', () => {
 
   it('rejects a duplicate user→role assignment', async () => {
     const user = await makeUser(prisma);
-    const role = await prisma.role.create({ data: { name: `R_${Date.now()}` } });
-    await prisma.userRole.create({ data: { userId: user.id, roleId: role.id } });
+    const role = await prisma.role.create({
+      data: { companyId: user.companyId, name: `R_${Date.now()}` },
+    });
+    await prisma.userRole.create({
+      data: { userId: user.id, roleId: role.id, companyId: user.companyId },
+    });
     await expect(
-      prisma.userRole.create({ data: { userId: user.id, roleId: role.id } }),
+      prisma.userRole.create({
+        data: { userId: user.id, roleId: role.id, companyId: user.companyId },
+      }),
     ).rejects.toThrow();
   });
 
   it('rejects a duplicate role→permission grant', async () => {
-    const role = await prisma.role.create({ data: { name: `R_${Date.now()}` } });
+    const company = await makeCompany(prisma);
+    const role = await prisma.role.create({
+      data: { companyId: company.id, name: `R_${Date.now()}` },
+    });
     const perm = await prisma.permission.create({
       data: { code: `perm:${Date.now()}`, module: 'm', permissionGroup: 'RBAC' },
     });
@@ -51,8 +60,15 @@ describe('RBAC persistence', () => {
   });
 
   it('persists protected role/permission flags exactly as written', async () => {
+    const company = await makeCompany(prisma);
     const role = await prisma.role.create({
-      data: { name: `SYS_${Date.now()}`, isSystem: true, isProtected: true, privilegeLevel: 100 },
+      data: {
+        companyId: company.id,
+        name: `SYS_${Date.now()}`,
+        isSystem: true,
+        isProtected: true,
+        privilegeLevel: 100,
+      },
     });
     const perm = await prisma.permission.create({
       data: { code: `prot:${Date.now()}`, module: 'm', permissionGroup: 'RBAC', isProtected: true },
@@ -67,9 +83,11 @@ describe('RBAC persistence', () => {
     // A user with roles but no explicit scope must have zero scope rows — there
     // is no persistence path that materialises implicit/global scope.
     const role = await prisma.role.create({
-      data: { name: `ADM_${Date.now()}`, privilegeLevel: 50 },
+      data: { companyId: user.companyId, name: `ADM_${Date.now()}`, privilegeLevel: 50 },
     });
-    await prisma.userRole.create({ data: { userId: user.id, roleId: role.id } });
+    await prisma.userRole.create({
+      data: { userId: user.id, roleId: role.id, companyId: user.companyId },
+    });
     expect(await prisma.userWarehouseScope.count({ where: { userId: user.id } })).toBe(0);
   });
 });

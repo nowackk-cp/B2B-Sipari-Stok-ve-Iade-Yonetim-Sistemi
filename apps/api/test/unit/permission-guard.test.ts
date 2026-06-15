@@ -64,7 +64,7 @@ function ctxFor(handler: () => unknown, cls: unknown, req: unknown): ExecutionCo
   } as unknown as ExecutionContext;
 }
 
-const SALES: PermissionSubject = { userId: 1n, roles: ['SALES'] };
+const SALES: PermissionSubject = { userId: 1n, companyId: 1n, roles: ['SALES'] };
 
 describe('PermissionService (effective permission computation + cache)', () => {
   it('loads permissions from the source on a cold cache and caches the result', async () => {
@@ -104,8 +104,12 @@ describe('PermissionService (effective permission computation + cache)', () => {
   it('uses a fresh cache key when the role set changes', async () => {
     const repo = new FakeRepo(['product:read']);
     const service = makeService(repo);
-    await service.getEffectivePermissions({ userId: 1n, roles: ['SALES'] });
-    await service.getEffectivePermissions({ userId: 1n, roles: ['SALES', 'FINANCE'] });
+    await service.getEffectivePermissions({ userId: 1n, companyId: 1n, roles: ['SALES'] });
+    await service.getEffectivePermissions({
+      userId: 1n,
+      companyId: 1n,
+      roles: ['SALES', 'FINANCE'],
+    });
     // Different role membership ⇒ different version ⇒ second DB load.
     expect(repo.calls).toBe(2);
   });
@@ -132,6 +136,7 @@ describe('PermissionGuard', () => {
 
   const principal: AuthPrincipal = {
     userId: 1n,
+    companyId: 1n,
     userPublicId: 'u-1',
     sessionId: 's-1',
     email: 'u@test.local',
@@ -183,6 +188,7 @@ describe('PermissionGuard merges controller + handler metadata', () => {
 
   const principal: AuthPrincipal = {
     userId: 1n,
+    companyId: 1n,
     userPublicId: 'u-1',
     sessionId: 's-1',
     email: 'u@test.local',

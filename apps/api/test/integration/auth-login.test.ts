@@ -124,6 +124,8 @@ describe('auth login (integration, real PostgreSQL)', () => {
         passwordHash: weakHash,
         fullName: 'Rehash',
         status: 'ACTIVE',
+        // Users are company-scoped (company_id NOT NULL); attach a fresh tenant.
+        company: { create: { name: 'Rehash Co' } },
       },
       select: { id: true },
     });

@@ -213,6 +213,10 @@ model Company {
   invoiceSeries InvoiceSeries[]
   invoices      Invoice[]
   importJobs    ImportJob[]
+  // RBAC tenancy (TASK-010b): users and roles are company-scoped. No role is
+  // global/assignable without a company — tenant isolation is a DB invariant.
+  users         User[]
+  roles         Role[]
 
   @@map("companies")
 }
@@ -232,6 +236,10 @@ model SystemSetting {
 model User {
   id                BigInt     @id @default(autoincrement())
   publicId          String     @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  // Owning tenant. Every user belongs to exactly one company; effective
+  // permissions are resolved ONLY through same-company roles (SECURITY_MODEL,
+  // TASK-010b). The principal's company is read from here, never from a JWT claim.
+  companyId         BigInt     @map("company_id")
   email             String     @unique @db.Citext
   passwordHash      String     @map("password_hash")
   fullName          String     @map("full_name")
@@ -247,6 +255,7 @@ model User {
   updatedAt         DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt         DateTime?  @map("deleted_at") @db.Timestamptz(6)
 
+  company             Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
   roles               UserRole[]           @relation("UserRoleUser")
@@ -275,7 +284,11 @@ model User {
   exportJobsCreated      ExportJob[]             @relation("ExportJobCreatedBy")
   auditLogs              AuditLog[]              @relation("AuditLogActor")
 
+  // Composite-FK target so user_roles.(user_id, company_id) can reference it and
+  // pin every assignment to this user's own tenant.
+  @@unique([id, companyId])
   @@index([status])
+  @@index([companyId])
   @@map("users")
 }
 
@@ -372,7 +385,11 @@ model PasswordResetToken {
 
 model Role {
   id             BigInt   @id @default(autoincrement())
-  name           String   @unique
+  // Owning tenant. Roles are ALWAYS company-scoped — there is no global/null
+  // assignable role. The same role name (e.g. ADMIN) exists as a distinct row
+  // per company; being protected/system never bypasses this tenant boundary.
+  companyId      BigInt   @map("company_id")
+  name           String
   description    String?
   isSystem       Boolean  @default(false) @map("is_system")
   isProtected    Boolean  @default(false) @map("is_protected")
@@ -380,9 +397,15 @@ model Role {
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
+  company     Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
   permissions RolePermission[]
   users       UserRole[]
 
+  // Role identity is (company, name): same name allowed across companies.
+  @@unique([companyId, name])
+  // Composite-FK target so user_roles.(role_id, company_id) references it.
+  @@unique([id, companyId])
+  @@index([companyId])
   @@map("roles")
 }
 
@@ -419,15 +442,24 @@ model RolePermission {
 model UserRole {
   userId       BigInt   @map("user_id")
   roleId       BigInt   @map("role_id")
+  // Tenant the assignment belongs to. Carried explicitly (not derived) so the
+  // two composite FKs below force user.company_id = role.company_id = this value
+  // at the DB level — a cross-company assignment is rejected by PostgreSQL, not
+  // merely by application code.
+  companyId    BigInt   @map("company_id")
   assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
   assignedById BigInt?  @map("assigned_by")
 
-  user       User  @relation("UserRoleUser", fields: [userId], references: [id], onDelete: Cascade)
-  role       Role  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  // Composite FKs pin both endpoints to the SAME company. `companyId` is the
+  // shared key, so user, role and assignment can never straddle two tenants.
+  user       User  @relation("UserRoleUser", fields: [userId, companyId], references: [id, companyId], onDelete: Cascade)
+  role       Role  @relation(fields: [roleId, companyId], references: [id, companyId], onDelete: Cascade)
   assignedBy User? @relation("UserRoleAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
 
+  // PK (user_id, role_id) already forbids a duplicate user-role-company row.
   @@id([userId, roleId])
   @@index([roleId])
+  @@index([companyId])
   @@map("user_roles")
 }
 
