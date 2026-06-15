@@ -16,6 +16,7 @@ import {
   closeTestApp,
   createTestApp,
   createUser,
+  deliverResetToken,
   refreshCookieFrom,
   resetDatabase,
   resetState,
@@ -103,7 +104,7 @@ describe('auth business audit (integration, real PostgreSQL)', () => {
   it('writes PASSWORD_RESET_COMPLETED after a reset', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const token = ctx.email.last().resetToken;
+    const token = await deliverResetToken(ctx);
     await request(ctx.http)
       .post(`${BASE}/reset-password`)
       .send({ token, newPassword: NEW_PASSWORD })

@@ -304,10 +304,20 @@ model PasswordResetToken {
   id            BigInt    @id @default(autoincrement())
   userId        BigInt    @map("user_id")
   // SHA-256 digest of the single-use reset token; plaintext is never stored.
+  // Verification (consume) uses this digest only.
   tokenHash     String    @unique @map("token_hash")
   expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
   consumedAt    DateTime? @map("consumed_at") @db.Timestamptz(6)
   requestedByIp String?   @map("requested_by_ip") @db.Inet
+  // Deliverable bearer secret, envelope-encrypted with AES-256-GCM (key is
+  // env-only, never in the DB). The raw token is NEVER stored in plaintext. The
+  // mail dispatcher decrypts these to send the link, then NULLs all three and
+  // stamps `deliveryConsumedAt` so the secret is single-delivery and a redelivery
+  // cannot re-send the email (AUTH-BLOCK-001).
+  deliveryCiphertext Bytes?    @map("delivery_ciphertext")
+  deliveryNonce      Bytes?    @map("delivery_nonce")
+  deliveryAuthTag    Bytes?    @map("delivery_auth_tag")
+  deliveryConsumedAt DateTime? @map("delivery_consumed_at") @db.Timestamptz(6)
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)

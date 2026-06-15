@@ -5,6 +5,7 @@ import {
   closeTestApp,
   createTestApp,
   createUser,
+  deliverResetToken,
   refreshCookieFrom,
   resetState,
 } from './helpers';
@@ -103,24 +104,32 @@ describe('auth password change / reset (integration, real PostgreSQL)', () => {
     expect(known.body.message).toBe(unknown.body.message);
   });
 
-  it('stores only a digest and enqueues the raw token via the outbox', async () => {
+  it('stores only a digest + sealed token and never a raw token in the outbox', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
 
     const event = ctx.email.last();
     expect(event.email).toBe(user.email);
-    expect(event.resetToken).toBeTruthy();
+    // The event carries only a reference, never the raw bearer token.
+    expect(event).not.toHaveProperty('resetToken');
+    expect(event.passwordResetTokenId).toBeTruthy();
+
+    // The raw token is obtainable only via the approved delivery boundary.
+    const token = await deliverResetToken(ctx, event);
+    expect(token).toBeTruthy();
 
     // DB stores a digest, never the raw token.
     const row = await ctx.prisma.passwordResetToken.findFirst({ where: { userId: user.id } });
     expect(row).not.toBeNull();
-    expect(row!.tokenHash).not.toBe(event.resetToken);
+    expect(row!.tokenHash).not.toBe(token);
     expect(row!.tokenHash).toHaveLength(64);
-    // The transactional outbox row carries the delivery payload.
+
+    // The transactional outbox row carries safe references only — no raw token.
     const outbox = await ctx.prisma.outboxEvent.findFirst({
       where: { eventType: 'auth.password_reset.requested', aggregateId: user.id },
     });
     expect(outbox).not.toBeNull();
+    expect(JSON.stringify(outbox!.payload)).not.toContain(token);
   });
 
   // --- reset password -------------------------------------------------------
@@ -129,7 +138,7 @@ describe('auth password change / reset (integration, real PostgreSQL)', () => {
     const user = await createUser(ctx.prisma);
     const session = await login(ctx, user.email, user.password);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const token = ctx.email.last().resetToken;
+    const token = await deliverResetToken(ctx);
 
     await request(ctx.http)
       .post(`${BASE}/reset-password`)
@@ -147,7 +156,7 @@ describe('auth password change / reset (integration, real PostgreSQL)', () => {
   it('rejects a second use of the same reset token (single-use)', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const token = ctx.email.last().resetToken;
+    const token = await deliverResetToken(ctx);
 
     await request(ctx.http)
       .post(`${BASE}/reset-password`)
@@ -169,9 +178,11 @@ describe('auth password change / reset (integration, real PostgreSQL)', () => {
   it('invalidates a prior reset token when a new one is requested', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const firstToken = ctx.email.last().resetToken;
+    const firstEvent = ctx.email.last();
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const secondToken = ctx.email.last().resetToken;
+    const secondEvent = ctx.email.last();
+    const firstToken = await deliverResetToken(ctx, firstEvent);
+    const secondToken = await deliverResetToken(ctx, secondEvent);
 
     // The first token is no longer usable; the second one is.
     await request(ctx.http)

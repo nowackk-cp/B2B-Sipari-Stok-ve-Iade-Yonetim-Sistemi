@@ -75,6 +75,12 @@ export class AppConfigService {
     return this.config.PASSWORD_RESET_TTL_MINUTES;
   }
 
+  /** Env-only AES-256-GCM key material for the deliverable reset token (never
+   * persisted; the cipher derives a fixed 256-bit key from it at boot). */
+  get passwordResetDeliveryKey(): string {
+    return this.config.PASSWORD_RESET_DELIVERY_KEY;
+  }
+
   // --- auth: durable account lockout -----------------------------------------
   get lockout(): { threshold: number; durationMinutes: number } {
     return {

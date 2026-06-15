@@ -13,6 +13,7 @@ import type {
   EmailOutbox,
   PasswordResetRequestedEvent,
 } from '../../src/modules/auth/ports/email-outbox.port';
+import { PasswordResetDeliveryService } from '../../src/modules/security/password-reset-delivery.service';
 
 /**
  * Truncate every application table so each test starts clean. Guarded against
@@ -49,8 +50,9 @@ export class MutableClock implements Clock {
   }
 }
 
-/** Email outbox spy that ALSO writes the real outbox row, so tests can assert
- * both the captured payload and the transactional DB write. */
+/** Email outbox spy that ALSO writes the real (secret-free) outbox row, so tests
+ * can assert both the captured event and the transactional DB write. Mirrors the
+ * production adapter: the raw token is NEVER part of the payload (AUTH-BLOCK-001). */
 export class CapturingEmailOutbox implements EmailOutbox {
   readonly events: PasswordResetRequestedEvent[] = [];
   async enqueuePasswordReset(
@@ -65,9 +67,11 @@ export class CapturingEmailOutbox implements EmailOutbox {
         aggregateId: event.userId,
         deduplicationKey: `password-reset:${event.dedupKey}`,
         payload: {
+          type: 'password-reset',
           template: 'password-reset',
           to: event.email,
-          resetToken: event.resetToken,
+          userId: event.userPublicId,
+          passwordResetTokenId: event.passwordResetTokenId.toString(),
           expiresAt: event.expiresAt.toISOString(),
         } satisfies Prisma.InputJsonObject,
       },
@@ -87,6 +91,8 @@ export interface TestApp {
   clock: MutableClock;
   rateLimiter: InMemoryRateLimiter;
   email: CapturingEmailOutbox;
+  /** The approved mail-delivery boundary: decrypts the sealed reset token. */
+  delivery: PasswordResetDeliveryService;
 }
 
 /**
@@ -115,7 +121,25 @@ export async function createTestApp(): Promise<TestApp> {
   await resetDatabase(prisma);
 
   const rateLimiter = app.get(RATE_LIMITER) as InMemoryRateLimiter;
-  return { app, http: app.getHttpServer(), prisma, clock, rateLimiter, email };
+  const delivery = app.get(PasswordResetDeliveryService);
+  return { app, http: app.getHttpServer(), prisma, clock, rateLimiter, email, delivery };
+}
+
+/**
+ * Drive a captured reset event through the approved delivery boundary and return
+ * the raw link token (the only place the plaintext token exists — in memory).
+ * This replaces reading the token from the outbox payload, which no longer
+ * carries it (AUTH-BLOCK-001).
+ */
+export async function deliverResetToken(
+  ctx: TestApp,
+  event: PasswordResetRequestedEvent = ctx.email.last(),
+): Promise<string> {
+  const result = await ctx.delivery.deliver(event.passwordResetTokenId);
+  if (!result.delivered) {
+    throw new Error(`reset delivery failed: ${result.reason}`);
+  }
+  return result.token;
 }
 
 export async function closeTestApp(ctx: TestApp): Promise<void> {

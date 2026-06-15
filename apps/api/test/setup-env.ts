@@ -16,6 +16,8 @@ const TEST_ENV: Record<string, string> = {
   SWAGGER_ENABLED: 'false',
   // Auth: a >=32-char dev-only signing secret so config validation passes.
   JWT_ACCESS_SECRET: 'test-only-access-secret-at-least-32-characters-long',
+  // >=32-byte dev-only AES key for the reset-token delivery cipher.
+  PASSWORD_RESET_DELIVERY_KEY: 'test-only-reset-delivery-key-at-least-32-bytes-long',
 };
 
 for (const [key, value] of Object.entries(TEST_ENV)) {

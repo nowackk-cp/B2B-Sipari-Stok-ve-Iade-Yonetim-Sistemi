@@ -5,6 +5,7 @@ import {
   closeTestApp,
   createTestApp,
   createUser,
+  deliverResetToken,
   refreshCookieFrom,
   resetState,
 } from './helpers';
@@ -53,7 +54,7 @@ describe('auth concurrency (integration, real PostgreSQL)', () => {
   it('two concurrent uses of the same reset token → exactly one succeeds', async () => {
     const user = await createUser(ctx.prisma);
     await request(ctx.http).post(`${BASE}/forgot-password`).send({ email: user.email }).expect(200);
-    const token = ctx.email.last().resetToken;
+    const token = await deliverResetToken(ctx);
 
     const statuses = await parallelStatuses(
       () =>

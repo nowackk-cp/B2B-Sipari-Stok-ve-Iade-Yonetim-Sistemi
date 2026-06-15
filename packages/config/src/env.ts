@@ -115,6 +115,14 @@ export const authEnvSchema = z.object({
   // Password reset token lifetime (single-use, digest-only).
   PASSWORD_RESET_TTL_MINUTES: z.coerce.number().int().positive().max(1440).default(30),
 
+  // AES-256-GCM key that envelope-encrypts the deliverable reset token so the
+  // raw bearer secret is NEVER persisted in plaintext (outbox/audit/log/DB). The
+  // key lives ONLY in the environment, never in the database. >= 32 bytes;
+  // fail-fast here and again when the cipher derives its 256-bit key at boot.
+  PASSWORD_RESET_DELIVERY_KEY: z
+    .string()
+    .min(32, 'PASSWORD_RESET_DELIVERY_KEY must be at least 32 bytes'),
+
   // Durable per-account lockout (authoritative in PostgreSQL, not Redis).
   AUTH_LOCKOUT_THRESHOLD: z.coerce.number().int().positive().max(100).default(5),
   AUTH_LOCKOUT_DURATION_MINUTES: z.coerce.number().int().positive().max(1440).default(15),

@@ -11,14 +11,16 @@ import type { TokenGenerator } from '../auth/ports/token-generator.port';
 import type { EmailOutbox } from '../auth/ports/email-outbox.port';
 import { UserRepository } from '../identity/user.repository';
 import { PasswordResetRepository } from './password-reset.repository';
+import { PasswordResetDeliveryCipher } from './password-reset-delivery.cipher';
 
 /**
  * Password-reset token lifecycle (CSPRNG, digest-only, single-use, short-lived).
  *
  * `requestReset` is enumeration-safe: it performs identical-looking work and the
  * controller always returns the same generic success. A token is only minted for
- * an existing active user, and the raw token reaches the user solely via the
- * transactional email outbox — never a log or audit row.
+ * an existing active user. The raw token is sealed (AES-256-GCM, env-only key)
+ * before it is persisted and is decrypted only at the mail-delivery boundary —
+ * it never appears in plaintext in the DB, a log, or an audit row (AUTH-BLOCK-001).
  */
 @Injectable()
 export class PasswordResetService {
@@ -27,6 +29,7 @@ export class PasswordResetService {
     private readonly users: UserRepository,
     private readonly prisma: PrismaService,
     private readonly config: AppConfigService,
+    private readonly deliveryCipher: PasswordResetDeliveryCipher,
     @Inject(TOKEN_GENERATOR) private readonly tokens: TokenGenerator,
     @Inject(EMAIL_OUTBOX) private readonly email: EmailOutbox,
     @Inject(CLOCK) private readonly clock: Clock,
@@ -47,19 +50,23 @@ export class PasswordResetService {
     }
 
     const { token, digest } = this.tokens.generate();
+    // The raw token is sealed (AES-256-GCM, env-only key) before it ever touches
+    // the database; only the ciphertext/nonce/tag and the digest are persisted.
+    const sealed = this.deliveryCipher.encrypt(token);
     const expiresAt = new Date(now.getTime() + this.config.passwordResetTtlMinutes * 60_000);
 
     await this.prisma.transaction(async (tx) => {
       await this.resets.consumeActiveForUser(user.id, now, tx);
-      await this.resets.create(
-        { userId: user.id, tokenHash: digest, expiresAt, requestedByIp: meta.ip },
+      const created = await this.resets.create(
+        { userId: user.id, tokenHash: digest, expiresAt, requestedByIp: meta.ip, sealed },
         tx,
       );
+      // Outbox carries only safe references — no raw token (AUTH-BLOCK-001).
       await this.email.enqueuePasswordReset(tx, {
+        passwordResetTokenId: created.id,
         userId: user.id,
         userPublicId: user.publicId,
         email: user.email,
-        resetToken: token,
         expiresAt,
         dedupKey: digest,
       });
