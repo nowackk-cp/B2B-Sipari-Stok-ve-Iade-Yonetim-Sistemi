@@ -14,12 +14,16 @@ import type { Clock } from '../../src/common/time/clock';
 
 const NOW = new Date('2026-06-15T12:00:00.000Z');
 
+const CLAIM_TOKEN = 'claim-token-abc';
+
 /** A claim as the repository would return it (secret left intact). */
 function claim(id = 7n): ClaimedResetDelivery {
   return {
     id,
     email: 'user@test.local',
     providerIdempotencyKey: `password-reset:${id}`,
+    deliveryClaimToken: CLAIM_TOKEN,
+    leaseUntil: new Date(NOW.getTime() + DELIVERY_LEASE_MS),
     sealed: {
       ciphertext: Buffer.from('ct'),
       nonce: Buffer.from('nonce'),
@@ -32,13 +36,16 @@ function build(over: {
   claimResult?: ClaimedResetDelivery | null;
   decrypt?: () => string;
   provider?: ResetEmailProvider;
+  /** Row count the finalizers report (0 = this worker lost the claim). */
+  finalizerCount?: number;
 }) {
   const claimResult = 'claimResult' in over ? over.claimResult : claim();
+  const count = over.finalizerCount ?? 1;
   const repo = {
     claimForDelivery: vi.fn(async () => claimResult),
-    markDelivered: vi.fn(async () => 1),
-    markFailed: vi.fn(async () => 1),
-    markUnknown: vi.fn(async () => 1),
+    markDelivered: vi.fn(async () => count),
+    markFailed: vi.fn(async () => count),
+    markUnknown: vi.fn(async () => count),
   } as unknown as PasswordResetRepository & {
     claimForDelivery: ReturnType<typeof vi.fn>;
     markDelivered: ReturnType<typeof vi.fn>;
@@ -80,9 +87,40 @@ describe('PasswordResetDeliveryService (lease/crash safety)', () => {
     );
     // Secret erased ONLY after the provider accepted (markDelivered after send).
     expect(repo.markDelivered).toHaveBeenCalledTimes(1);
+    // Finalization is fenced by the claim token from the claim.
+    expect(repo.markDelivered).toHaveBeenCalledWith(7n, CLAIM_TOKEN, NOW, 'pmid-1');
     const sendOrder = send.mock.invocationCallOrder[0] ?? 0;
     const markOrder = repo.markDelivered.mock.invocationCallOrder[0] ?? 0;
     expect(sendOrder).toBeLessThan(markOrder);
+  });
+
+  it('returns claim_lost (not delivered) when markDelivered updates zero rows', async () => {
+    // The provider accepted the email, but a newer worker re-claimed the row, so
+    // our fenced markDelivered matches nothing.
+    const { service, repo, provider } = build({ finalizerCount: 0 });
+
+    const result = await service.deliver(7n);
+
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    expect(repo.markDelivered).toHaveBeenCalledTimes(1);
+    // Must NOT claim success, and must not attempt any further mutation.
+    expect(result).toEqual({ delivered: false, reason: 'claim_lost' });
+    expect(repo.markFailed).not.toHaveBeenCalled();
+    expect(repo.markUnknown).not.toHaveBeenCalled();
+  });
+
+  it('returns claim_lost when a fenced markFailed updates zero rows', async () => {
+    const provider = {
+      supportsIdempotency: true,
+      send: vi.fn(async () => {
+        throw new Error('smtp down');
+      }),
+    } as unknown as ResetEmailProvider;
+    const { service, repo } = build({ provider, finalizerCount: 0 });
+
+    const result = await service.deliver(7n);
+    expect(result).toEqual({ delivered: false, reason: 'claim_lost' });
+    expect(repo.markFailed).toHaveBeenCalledWith(7n, CLAIM_TOKEN, 'smtp down');
   });
 
   it('returns not_claimable and never calls the provider when the claim is lost', async () => {

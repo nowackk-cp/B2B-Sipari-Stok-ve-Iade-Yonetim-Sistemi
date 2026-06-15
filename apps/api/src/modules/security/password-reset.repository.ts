@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { DbClient } from '../../common/database/db-client';
 import { PrismaService } from '../../common/database/prisma.service';
@@ -14,6 +15,13 @@ export interface DeliverableResetToken {
 export interface ClaimedResetDelivery extends DeliverableResetToken {
   /** Stable provider idempotency key for this row: `password-reset:{id}`. */
   providerIdempotencyKey: string;
+  /**
+   * Fencing token for THIS claim. Must be presented to every finalizer; a newer
+   * claim rotates it, so a stale worker can no longer mutate the row.
+   */
+  deliveryClaimToken: string;
+  /** When this claim's lease lapses (a later worker may re-claim afterwards). */
+  leaseUntil: Date;
 }
 
 /**
@@ -96,6 +104,10 @@ export class PasswordResetRepository {
    * predicate after that commit and match nothing. The winner then re-reads the
    * still-sealed ciphertext to decrypt in memory. The ciphertext/nonce/tag are
    * intentionally left intact — they are erased only on delivery success.
+   *
+   * Each successful claim also mints a fresh CSPRNG `deliveryClaimToken` (a
+   * fencing token). Finalizers must present it; a later re-claim rotates it, so a
+   * stale worker that lost the race can no longer overwrite the row.
    */
   async claimForDelivery(
     id: bigint,
@@ -105,6 +117,9 @@ export class PasswordResetRepository {
   ): Promise<ClaimedResetDelivery | null> {
     const db = this.db(executor);
     const providerIdempotencyKey = `password-reset:${id}`;
+    // Fresh, unguessable fencing token for this claim. A re-claim overwrites it,
+    // invalidating any earlier holder's token.
+    const deliveryClaimToken = randomUUID();
     const res = await db.passwordResetToken.updateMany({
       where: {
         id,
@@ -121,6 +136,7 @@ export class PasswordResetRepository {
         // Stable across retries (same value every claim) — used as the provider
         // idempotency key so a crash-retry cannot create a second real email.
         providerIdempotencyKey,
+        deliveryClaimToken,
       },
     });
     if (res.count !== 1) return null;
@@ -132,17 +148,29 @@ export class PasswordResetRepository {
         deliveryCiphertext: true,
         deliveryNonce: true,
         deliveryAuthTag: true,
+        deliveryClaimToken: true,
+        deliveryLeaseUntil: true,
         user: { select: { email: true } },
       },
     });
-    // The winner holds the lease, so the secret is still present here.
-    if (!row || !row.deliveryCiphertext || !row.deliveryNonce || !row.deliveryAuthTag) {
+    // The winner holds a live lease, so both the secret and the just-minted
+    // claim token are still present here (no other worker could have rotated them).
+    if (
+      !row ||
+      !row.deliveryCiphertext ||
+      !row.deliveryNonce ||
+      !row.deliveryAuthTag ||
+      !row.deliveryClaimToken ||
+      !row.deliveryLeaseUntil
+    ) {
       return null;
     }
     return {
       id: row.id,
       email: row.user.email,
       providerIdempotencyKey,
+      deliveryClaimToken: row.deliveryClaimToken,
+      leaseUntil: row.deliveryLeaseUntil,
       sealed: {
         ciphertext: row.deliveryCiphertext,
         nonce: row.deliveryNonce,
@@ -154,23 +182,26 @@ export class PasswordResetRepository {
   /**
    * Record a successful provider send and ONLY THEN erase the secret: flip to
    * `SUCCEEDED`, stamp `deliveredAt`, store `providerMessageId`, drop the lease,
-   * and NULL the ciphertext/nonce/tag. Guarded on `IN_PROGRESS` so a stale
-   * worker that lost its lease cannot resurrect or re-erase the row. Returns the
-   * number of rows updated (1 = this worker finalised it).
+   * and NULL the ciphertext/nonce/tag. Guarded on `IN_PROGRESS` AND a matching
+   * `deliveryClaimToken`, so a stale worker whose claim was superseded cannot
+   * resurrect or re-erase the row. Returns the number of rows updated (0 = this
+   * worker lost claim ownership; it must not mutate further).
    */
   async markDelivered(
     id: bigint,
+    claimToken: string,
     now: Date,
     providerMessageId: string,
     executor?: DbClient,
   ): Promise<number> {
     const res = await this.db(executor).passwordResetToken.updateMany({
-      where: { id, deliveryStatus: 'IN_PROGRESS' },
+      where: { id, deliveryStatus: 'IN_PROGRESS', deliveryClaimToken: claimToken },
       data: {
         deliveryStatus: 'SUCCEEDED',
         deliveredAt: now,
         providerMessageId,
         deliveryLeaseUntil: null,
+        deliveryClaimToken: null,
         deliveryLastError: null,
         // The email is durably accepted — erase the deliverable secret now.
         deliveryCiphertext: null,
@@ -184,11 +215,18 @@ export class PasswordResetRepository {
   /**
    * Mark a retryable failure: flip to `FAILED`, drop the lease, record the error.
    * The encrypted secret is preserved so a later claim can rebuild the email.
-   * Only valid for an idempotency-capable provider (retry is safe).
+   * Only valid for an idempotency-capable provider (retry is safe). Guarded on a
+   * matching `deliveryClaimToken` so a superseded worker cannot drop a newer
+   * worker's live claim. Returns 0 when this worker lost claim ownership.
    */
-  async markFailed(id: bigint, error: string, executor?: DbClient): Promise<number> {
+  async markFailed(
+    id: bigint,
+    claimToken: string,
+    error: string,
+    executor?: DbClient,
+  ): Promise<number> {
     const res = await this.db(executor).passwordResetToken.updateMany({
-      where: { id, deliveryStatus: 'IN_PROGRESS' },
+      where: { id, deliveryStatus: 'IN_PROGRESS', deliveryClaimToken: claimToken },
       data: {
         deliveryStatus: 'FAILED',
         deliveryLeaseUntil: null,
@@ -202,11 +240,18 @@ export class PasswordResetRepository {
    * Quarantine an ambiguous delivery for manual review: flip to `UNKNOWN`, drop
    * the lease, record the error, and KEEP the secret. Used when the provider
    * cannot guarantee exactly-once (an auto-retry could send a duplicate), so the
-   * row is deliberately not re-claimable until a human resolves it.
+   * row is deliberately not re-claimable until a human resolves it. Guarded on a
+   * matching `deliveryClaimToken` so a superseded worker cannot quarantine a newer
+   * worker's live claim. Returns 0 when this worker lost claim ownership.
    */
-  async markUnknown(id: bigint, error: string, executor?: DbClient): Promise<number> {
+  async markUnknown(
+    id: bigint,
+    claimToken: string,
+    error: string,
+    executor?: DbClient,
+  ): Promise<number> {
     const res = await this.db(executor).passwordResetToken.updateMany({
-      where: { id, deliveryStatus: 'IN_PROGRESS' },
+      where: { id, deliveryStatus: 'IN_PROGRESS', deliveryClaimToken: claimToken },
       data: {
         deliveryStatus: 'UNKNOWN',
         deliveryLeaseUntil: null,

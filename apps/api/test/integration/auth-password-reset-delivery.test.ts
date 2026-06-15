@@ -63,6 +63,20 @@ class FailingNonIdempotentProvider implements ResetEmailProvider {
   }
 }
 
+/**
+ * Idempotent provider that runs a test hook DURING send() — used to simulate a
+ * newer worker re-claiming the row while the current worker is mid-send, so the
+ * current worker's fenced markDelivered later loses the race.
+ */
+class HookedDuringSendProvider implements ResetEmailProvider {
+  readonly supportsIdempotency = true;
+  hook: () => Promise<void> = async () => {};
+  async send(): Promise<SendResetEmailResult> {
+    await this.hook();
+    return { providerMessageId: 'pmid-during-send' };
+  }
+}
+
 describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
   // --- default (idempotent placeholder) provider --------------------------
   describe('claim + lease lifecycle', () => {
@@ -175,6 +189,110 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
       expect(row.deliveryStatus).toBe('IN_PROGRESS');
       // Exactly one claim took effect.
       expect(row.deliveryAttemptCount).toBe(1);
+      // The winner's token is the one persisted on the row.
+      expect(row.deliveryClaimToken).toBe(winners[0]!.deliveryClaimToken);
+    });
+
+    it('mints a fresh, distinct claim token on every re-claim', async () => {
+      const id = await requestReset(ctx);
+      const tokens = new Set<string>();
+      for (let i = 0; i < 3; i += 1) {
+        const now = ctx.clock.now();
+        const claim = await ctx.resets.claimForDelivery(
+          id,
+          now,
+          new Date(now.getTime() + DELIVERY_LEASE_MS),
+        );
+        expect(claim).not.toBeNull();
+        tokens.add(claim!.deliveryClaimToken);
+        // Let the lease lapse so the next claim is allowed.
+        ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      }
+      expect(tokens.size).toBe(3);
+    });
+
+    it('fences a stale worker out of overwriting a newer claim', async () => {
+      const id = await requestReset(ctx);
+      const t0 = ctx.clock.now();
+
+      // Worker A claims the row.
+      const claimA = await ctx.resets.claimForDelivery(
+        id,
+        t0,
+        new Date(t0.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(claimA).not.toBeNull();
+
+      // A's lease lapses; Worker B re-claims with a fresh, different token.
+      ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+      const tB = ctx.clock.now();
+      const claimB = await ctx.resets.claimForDelivery(
+        id,
+        tB,
+        new Date(tB.getTime() + DELIVERY_LEASE_MS),
+      );
+      expect(claimB).not.toBeNull();
+      expect(claimB!.deliveryClaimToken).not.toBe(claimA!.deliveryClaimToken);
+
+      // A returns late and tries to finalize with its STALE token — every
+      // finalizer must update zero rows.
+      expect(
+        await ctx.resets.markDelivered(
+          id,
+          claimA!.deliveryClaimToken,
+          ctx.clock.now(),
+          'stale-msg',
+        ),
+      ).toBe(0);
+      expect(await ctx.resets.markFailed(id, claimA!.deliveryClaimToken, 'stale')).toBe(0);
+      expect(await ctx.resets.markUnknown(id, claimA!.deliveryClaimToken, 'stale')).toBe(0);
+
+      // B's claim is untouched: still IN_PROGRESS, secret intact, B's token.
+      const mid = await rowOf(ctx, id);
+      expect(mid.deliveryStatus).toBe('IN_PROGRESS');
+      expect(mid.deliveryClaimToken).toBe(claimB!.deliveryClaimToken);
+      expect(mid.deliveryCiphertext).not.toBeNull();
+      expect(mid.deliveredAt).toBeNull();
+
+      // B finalizes with ITS token — succeeds, and only NOW is the secret erased.
+      expect(
+        await ctx.resets.markDelivered(id, claimB!.deliveryClaimToken, ctx.clock.now(), 'msg-b'),
+      ).toBe(1);
+      const done = await rowOf(ctx, id);
+      expect(done.deliveryStatus).toBe('SUCCEEDED');
+      expect(done.providerMessageId).toBe('msg-b');
+      expect(done.deliveryCiphertext).toBeNull();
+    });
+
+    it('never leaks the claim token into outbox payloads or audit rows', async () => {
+      const user = await createUser(ctx.prisma);
+      const forgot = await request(ctx.http)
+        .post(`${BASE}/forgot-password`)
+        .send({ email: user.email })
+        .expect(200);
+      const id = ctx.email.last().passwordResetTokenId;
+      const now = ctx.clock.now();
+      const claim = await ctx.resets.claimForDelivery(
+        id,
+        now,
+        new Date(now.getTime() + DELIVERY_LEASE_MS),
+      );
+      const claimToken = claim!.deliveryClaimToken;
+
+      // Not echoed in the generic API response.
+      expect(JSON.stringify(forgot.body)).not.toContain(claimToken);
+
+      // Not written to any outbox payload or audit row.
+      const scans = [
+        `SELECT count(*)::int AS n FROM outbox_events o WHERE strpos(o.payload::text, $1) > 0`,
+        `SELECT count(*)::int AS n FROM audit_logs a WHERE strpos(a::text, $1) > 0`,
+      ];
+      let total = 0;
+      for (const sql of scans) {
+        const rows = await ctx.prisma.$queryRawUnsafe<Array<{ n: number }>>(sql, claimToken);
+        total += rows[0]?.n ?? 0;
+      }
+      expect(total).toBe(0);
     });
   });
 
@@ -300,6 +418,50 @@ describe('password reset delivery lease/crash safety (real PostgreSQL)', () => {
       expect(again.delivered).toBe(false);
       expect(again).toMatchObject({ reason: 'not_claimable' });
       expect((await rowOf(ctx, id)).deliveryStatus).toBe('UNKNOWN');
+    });
+  });
+
+  // --- service returns claim_lost when superseded mid-send ------------------
+  describe('service claim_lost on supersede', () => {
+    const provider = new HookedDuringSendProvider();
+    let ctx: TestApp;
+    beforeAll(async () => {
+      ctx = await createTestApp({ emailProvider: provider });
+    });
+    afterAll(async () => {
+      await closeTestApp(ctx);
+    });
+    beforeEach(async () => {
+      await resetState(ctx);
+      provider.hook = async () => {};
+    });
+
+    it('deliver() returns claim_lost and leaves the newer claim intact', async () => {
+      const id = await requestReset(ctx);
+
+      // While worker A is inside provider.send(), worker B steals the lapsed lease
+      // and re-claims, rotating the fencing token out from under A.
+      provider.hook = async () => {
+        ctx.clock.advanceMs(DELIVERY_LEASE_MS + 1_000);
+        const now = ctx.clock.now();
+        const b = await ctx.resets.claimForDelivery(
+          id,
+          now,
+          new Date(now.getTime() + DELIVERY_LEASE_MS),
+        );
+        expect(b).not.toBeNull();
+      };
+
+      const result = await ctx.delivery.deliver(id);
+      expect(result.delivered).toBe(false);
+      expect(result).toMatchObject({ reason: 'claim_lost' });
+
+      // A's fenced markDelivered updated nothing: B's claim is still live and the
+      // secret was NOT erased.
+      const row = await rowOf(ctx, id);
+      expect(row.deliveryStatus).toBe('IN_PROGRESS');
+      expect(row.deliveredAt).toBeNull();
+      expect(row.deliveryCiphertext).not.toBeNull();
     });
   });
 });

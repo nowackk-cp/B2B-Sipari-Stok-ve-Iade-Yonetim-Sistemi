@@ -21,8 +21,11 @@ export type DeliveryResult =
        *   secret is preserved and the row is retryable.
        * - `unknown`       — ambiguous result with a non-idempotent provider (or an
        *   unusable secret); quarantined for manual review, secret preserved.
+       * - `claim_lost`    — a newer worker re-claimed the row before this worker
+       *   could finalize (fencing-token mismatch); this worker wrote nothing and
+       *   must not retry the mutation.
        */
-      reason: 'not_claimable' | 'failed' | 'unknown';
+      reason: 'not_claimable' | 'failed' | 'unknown' | 'claim_lost';
     };
 
 /**
@@ -67,13 +70,20 @@ export class PasswordResetDeliveryService {
       return { delivered: false, reason: 'not_claimable' };
     }
 
+    const { deliveryClaimToken } = claim;
+
     let token: string;
     try {
       token = this.cipher.decrypt(claim.sealed);
     } catch {
       // The sealed secret will not open (tamper / key mismatch). Do NOT erase it;
       // quarantine for manual review rather than silently losing the reset.
-      await this.resets.markUnknown(passwordResetTokenId, 'decrypt_failed');
+      const count = await this.resets.markUnknown(
+        passwordResetTokenId,
+        deliveryClaimToken,
+        'decrypt_failed',
+      );
+      if (count === 0) return this.claimLost(passwordResetTokenId);
       this.logger.error(
         {
           event: 'auth.password_reset.delivery_quarantined',
@@ -91,12 +101,16 @@ export class PasswordResetDeliveryService {
         token,
         idempotencyKey: claim.providerIdempotencyKey,
       });
-      // Provider accepted the email — now (and only now) erase the secret.
-      await this.resets.markDelivered(
+      // Provider accepted the email — now (and only now) erase the secret, but
+      // ONLY if we still own the claim (fencing token). A stale worker whose lease
+      // lapsed and was re-claimed writes nothing and must not report success.
+      const count = await this.resets.markDelivered(
         passwordResetTokenId,
+        deliveryClaimToken,
         this.clock.now(),
         result.providerMessageId,
       );
+      if (count === 0) return this.claimLost(passwordResetTokenId);
       // NOTE: the raw token is intentionally NOT logged.
       this.logger.info(
         {
@@ -116,7 +130,12 @@ export class PasswordResetDeliveryService {
       const message = err instanceof Error ? err.message : String(err);
       if (this.provider.supportsIdempotency) {
         // Retry is safe (provider dedups by key) — keep the secret, mark retryable.
-        await this.resets.markFailed(passwordResetTokenId, message);
+        const count = await this.resets.markFailed(
+          passwordResetTokenId,
+          deliveryClaimToken,
+          message,
+        );
+        if (count === 0) return this.claimLost(passwordResetTokenId);
         this.logger.warn(
           {
             event: 'auth.password_reset.delivery_failed',
@@ -128,7 +147,12 @@ export class PasswordResetDeliveryService {
       }
       // No provider idempotency: an auto-retry could send a duplicate, so we do
       // NOT retry and do NOT erase the secret — quarantine for manual review.
-      await this.resets.markUnknown(passwordResetTokenId, message);
+      const count = await this.resets.markUnknown(
+        passwordResetTokenId,
+        deliveryClaimToken,
+        message,
+      );
+      if (count === 0) return this.claimLost(passwordResetTokenId);
       this.logger.error(
         {
           event: 'auth.password_reset.delivery_quarantined',
@@ -139,5 +163,21 @@ export class PasswordResetDeliveryService {
       );
       return { delivered: false, reason: 'unknown' };
     }
+  }
+
+  /**
+   * A finalizer updated zero rows: a newer worker re-claimed this row (the
+   * fencing token rotated). This worker mutated nothing — it must not retry and
+   * must not report success. The owning worker is responsible for the outcome.
+   */
+  private claimLost(passwordResetTokenId: bigint): DeliveryResult {
+    this.logger.warn(
+      {
+        event: 'auth.password_reset.delivery_claim_lost',
+        passwordResetTokenId: passwordResetTokenId.toString(),
+      },
+      'password reset delivery claim lost to a newer worker (no-op finalization)',
+    );
+    return { delivered: false, reason: 'claim_lost' };
   }
 }
