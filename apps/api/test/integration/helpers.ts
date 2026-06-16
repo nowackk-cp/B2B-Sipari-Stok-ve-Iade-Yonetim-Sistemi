@@ -329,6 +329,30 @@ export async function createWarehouse(
   return wh;
 }
 
+let productSeq = 0;
+
+/** Create a product directly in `companyId` (catalog is company-scoped). Used to
+ * stand up another tenant's product without going through the API. */
+export async function createProduct(
+  prisma: PrismaClient,
+  companyId: bigint,
+  over: Partial<{ sku: string; name: string; isActive: boolean; deletedAt: Date | null }> = {},
+): Promise<{ id: bigint; publicId: string; sku: string; companyId: bigint }> {
+  productSeq += 1;
+  const sku = over.sku ?? `SKU_${Date.now().toString(36)}_${productSeq}`;
+  const product = await prisma.product.create({
+    data: {
+      companyId,
+      sku,
+      name: over.name ?? `Product ${productSeq}`,
+      isActive: over.isActive ?? true,
+      deletedAt: over.deletedAt ?? null,
+    },
+    select: { id: true, publicId: true, sku: true, companyId: true },
+  });
+  return product;
+}
+
 /** Grant `userId` an explicit warehouse scope (same tenant — composite FKs enforce it). */
 export async function assignWarehouseScope(
   prisma: PrismaClient,

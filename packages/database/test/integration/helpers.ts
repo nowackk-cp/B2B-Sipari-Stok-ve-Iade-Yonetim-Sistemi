@@ -51,10 +51,17 @@ export async function makeWarehouse(
   });
 }
 
-export async function makeProduct(prisma: PrismaClient, over: Partial<{ sku: string }> = {}) {
+export async function makeProduct(
+  prisma: PrismaClient,
+  over: Partial<{ sku: string; companyId: bigint }> = {},
+) {
   const s = uniqueSuffix();
+  // Products are company-scoped (company_id NOT NULL, TASK-011). Attach a fresh
+  // tenant unless the caller pins one, so factory products never collide on the
+  // company-scoped SKU unique.
+  const companyId = over.companyId ?? (await makeCompany(prisma)).id;
   return prisma.product.create({
-    data: { sku: over.sku ?? `SKU_${s}`, name: `Product ${s}` },
+    data: { companyId, sku: over.sku ?? `SKU_${s}`, name: `Product ${s}` },
   });
 }
 

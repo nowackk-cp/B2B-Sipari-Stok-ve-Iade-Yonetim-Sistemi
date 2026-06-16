@@ -16,20 +16,31 @@ describe('soft delete & partial unique', () => {
     await resetDatabase(prisma);
   });
 
-  it('enforces unique SKU among live products only', async () => {
+  it('enforces unique SKU among live products PER COMPANY only', async () => {
     const sku = `SKU_${uniqueSuffix()}`;
-    const first = await prisma.product.create({ data: { sku, name: 'A' } });
-    // A second live product with the same SKU is rejected.
-    await expect(prisma.product.create({ data: { sku, name: 'B' } })).rejects.toThrow();
+    const companyA = await makeCompany(prisma);
+    const companyB = await makeCompany(prisma);
+    const first = await prisma.product.create({ data: { companyId: companyA.id, sku, name: 'A' } });
+    // A second live product with the same SKU in the SAME company is rejected.
+    await expect(
+      prisma.product.create({ data: { companyId: companyA.id, sku, name: 'B' } }),
+    ).rejects.toThrow();
+    // …but a DIFFERENT company may reuse the same SKU (TASK-011: company-scoped).
+    const other = await prisma.product.create({
+      data: { companyId: companyB.id, sku, name: 'B-tenant' },
+    });
+    expect(other.companyId).toBe(companyB.id);
 
-    // Soft-delete the first; the SKU becomes reusable for a new live product.
+    // Soft-delete the first; the SKU becomes reusable for a new live product in A.
     await prisma.product.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
-    const reused = await prisma.product.create({ data: { sku, name: 'C' } });
+    const reused = await prisma.product.create({
+      data: { companyId: companyA.id, sku, name: 'C' },
+    });
     expect(reused.id).not.toBe(first.id);
 
-    // Two soft-deleted rows may share the SKU.
+    // Two soft-deleted rows in company A may share the SKU.
     await prisma.product.update({ where: { id: reused.id }, data: { deletedAt: new Date() } });
-    const counts = await prisma.product.count({ where: { sku } });
+    const counts = await prisma.product.count({ where: { companyId: companyA.id, sku } });
     expect(counts).toBe(2);
   });
 

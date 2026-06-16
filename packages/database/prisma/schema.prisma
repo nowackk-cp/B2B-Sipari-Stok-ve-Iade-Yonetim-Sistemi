@@ -221,6 +221,10 @@ model Company {
   // warehouse access can never straddle tenants. Composite FKs on
   // user_warehouse_scopes pin user.company_id = warehouse.company_id.
   warehouses    Warehouse[]
+  // Catalog (TASK-011): products are company-scoped master data. The same SKU
+  // may exist in different companies; within one company it is unique among
+  // active rows (partial unique `(company_id, sku) WHERE deleted_at IS NULL`).
+  products      Product[]
   // Authorization cache version (PG-004): the per-company monotonic counter that
   // anchors the effective-permission cache key. Maintained entirely by DB
   // triggers (migration 20260616030000_authorization_cache_version).
@@ -567,19 +571,30 @@ model Category {
 model Product {
   id              BigInt    @id @default(autoincrement())
   publicId        String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  // Owning tenant (NOT NULL). Products are company-scoped master data; the SKU
+  // uniqueness, every list/get and all mutations are filtered by this company,
+  // resolved from the PostgreSQL principal — never a JWT claim (TASK-011).
+  companyId       BigInt    @map("company_id")
   sku             String
   name            String
+  // Free-text product-card description (TASK-011). Nullable.
+  description     String?
   categoryId      BigInt?   @map("category_id")
   barcode         String?
   unit            String    @default("EACH")
   listPriceAmount BigInt    @default(0) @map("list_price_amount")
   currency        String    @default("TRY") @db.Char(3)
   taxRateBp       Int       @default(2000) @map("tax_rate_bp")
+  // Optional low-stock alert threshold for the product card (TASK-011). This is a
+  // catalog attribute, NOT a stock quantity — actual on-hand/reserved live in the
+  // inventory module (CLAUDE rule 20). Nullable; CHECK enforces >= 0 when set.
+  criticalStockThreshold BigInt? @map("critical_stock_threshold")
   isActive        Boolean   @default(true) @map("is_active")
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
 
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
   category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
   orderItems         OrderItem[]
@@ -591,7 +606,12 @@ model Product {
   invoiceItems       InvoiceItem[]
   quoteItems         QuoteItem[]
 
-  @@unique([sku])
+  // SKU identity is (company, sku): the same SKU may exist across companies.
+  // The init/TASK-011 migration converts this to a PARTIAL unique
+  // (`WHERE deleted_at IS NULL`), preserving the index name, so a soft-deleted
+  // product's SKU becomes reusable within the same company.
+  @@unique([companyId, sku], map: "products_sku_key")
+  @@index([companyId])
   @@index([categoryId])
   @@index([isActive])
   @@index([barcode])

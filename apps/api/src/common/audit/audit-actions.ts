@@ -15,6 +15,11 @@ export const AUDIT_ACTIONS = {
   ACCOUNT_LOCKED: 'ACCOUNT_LOCKED',
   ACCOUNT_UNLOCKED: 'ACCOUNT_UNLOCKED',
   TOKEN_REUSE_DETECTED: 'TOKEN_REUSE_DETECTED',
+  // Catalog (TASK-011): product master-data mutations. Each writes a business
+  // audit row inside the SAME transaction as the change (ADR-007).
+  PRODUCT_CREATED: 'PRODUCT_CREATED',
+  PRODUCT_UPDATED: 'PRODUCT_UPDATED',
+  PRODUCT_DELETED: 'PRODUCT_DELETED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

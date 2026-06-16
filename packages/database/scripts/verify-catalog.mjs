@@ -95,13 +95,15 @@ async function main() {
   requirePartial('import_jobs_active_checksum_key', ['status', 'UPLOADED', 'IMPORTING']);
   for (const name of [
     'users_email_key',
-    'products_sku_key',
     'warehouses_code_key',
     'customers_code_key',
     'categories_slug_key',
   ]) {
     requirePartial(name, ['deleted_at']);
   }
+  // TASK-011: the product SKU unique is COMPANY-SCOPED + soft-delete partial, so a
+  // SKU is unique only among a company's active products and reusable after delete.
+  requirePartial('products_sku_key', ['deleted_at', 'company_id']);
 
   // 4. CHECK constraints.
   const checks = await prisma.$queryRawUnsafe(`
@@ -162,6 +164,9 @@ async function main() {
     'warehouses_company_id_fkey',
     'user_warehouse_scopes_user_id_company_id_fkey',
     'user_warehouse_scopes_warehouse_id_company_id_fkey',
+    // TASK-011: products are tenant-scoped; the company FK must RESTRICT so a
+    // company that still owns products cannot be hard-deleted out from under them.
+    'products_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
@@ -185,6 +190,8 @@ async function main() {
   // the composite FKs can pin user.company = warehouse.company = scope.company.
   requireCol('warehouses.company_id', { notNull: true });
   requireCol('user_warehouse_scopes.company_id', { notNull: true });
+  // Catalog tenancy (TASK-011): products carry a NOT NULL company_id.
+  requireCol('products.company_id', { notNull: true });
   requireCol('import_jobs.company_id', { notNull: true });
   requireCol('import_jobs.replay_of_import_id');
   requireCol('import_jobs.attempt_number', { notNull: true });
