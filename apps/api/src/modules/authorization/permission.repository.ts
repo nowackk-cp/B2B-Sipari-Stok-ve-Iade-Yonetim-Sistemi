@@ -27,6 +27,23 @@ export class PermissionRepository {
     return executor ?? this.prisma.client;
   }
 
+  /**
+   * Current authorization version for `companyId` — the DB-sourced (never JWT)
+   * monotonic counter that anchors the effective-permission cache key (PG-004).
+   * Every permission-affecting change bumps it via a trigger, so reading it
+   * before a cache lookup guarantees a moved version is observed on EVERY
+   * instance and a stale entry is never reused. A company with no counter row
+   * (should not happen — the AFTER INSERT trigger seeds one) reads as the safe
+   * baseline `1n`.
+   */
+  async loadAuthzVersion(companyId: bigint, executor?: DbClient): Promise<bigint> {
+    const row = await this.db(executor).companyAuthzVersion.findUnique({
+      where: { companyId },
+      select: { version: true },
+    });
+    return row?.version ?? 1n;
+  }
+
   /** Distinct effective permission codes for `userId` within `companyId`. */
   async loadEffectivePermissionCodes(
     userId: bigint,

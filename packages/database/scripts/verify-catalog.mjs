@@ -41,6 +41,20 @@ async function main() {
     if (!triggerNames.has(name)) fail(`missing append-only trigger: ${name}`);
   }
 
+  // 1b. Authorization cache version triggers (PG-004) — every permission-affecting
+  //     change must bump the owning company's authorization_version, and every new
+  //     company must get a baseline counter row. Without these the multi-instance
+  //     stale-cache guarantee silently breaks, so the gate asserts them explicitly.
+  for (const name of [
+    'authz_init_company',
+    'authz_bump_user_roles',
+    'authz_bump_role_permissions',
+    'authz_bump_roles',
+    'authz_bump_users',
+  ]) {
+    if (!triggerNames.has(name)) fail(`missing authorization-version trigger: ${name}`);
+  }
+
   // 2. Delete-prevention triggers on transaction parents + master users.
   for (const name of [
     'no_delete_orders',
@@ -154,6 +168,9 @@ async function main() {
   };
   requireCol('effect_receipts.outbox_event_id', { notNull: true });
   requireCol('effect_receipts.completed_at');
+  // Authorization cache version counter (PG-004).
+  requireCol('company_authz_versions.company_id', { notNull: true });
+  requireCol('company_authz_versions.version', { notNull: true });
   requireCol('import_jobs.company_id', { notNull: true });
   requireCol('import_jobs.replay_of_import_id');
   requireCol('import_jobs.attempt_number', { notNull: true });

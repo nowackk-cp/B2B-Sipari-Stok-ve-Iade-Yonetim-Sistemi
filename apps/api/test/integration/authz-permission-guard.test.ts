@@ -212,28 +212,32 @@ describe('PermissionGuard (integration, real PostgreSQL)', () => {
       .expect(200);
   });
 
-  it('12. surfaces a permission change once the cache is invalidated', async () => {
+  it('12. surfaces a permission change immediately via the DB authz version (no clear needed)', async () => {
     const user = await createUser(ctx.prisma);
-    // Stable role so its security-version (cache key) stays constant across the test.
+    // Stable role so its security-version (the role-membership part of the key)
+    // stays constant — only the DB authorization_version moves below.
     await grantPermissionsViaRole(ctx.prisma, user.id, ['order:create'], 'CACHE_ROLE');
     const token = await login(ctx, user.email, user.password);
 
-    // Missing order:approve → 403, and the (stale) negative result is cached.
+    // Missing order:approve → 403, and the negative result is cached.
     await request(ctx.http)
       .get(`${BASE}/test-authz/multiple`)
       .set('Authorization', `Bearer ${token}`)
       .expect(403);
 
-    // Grant the missing permission WITHOUT changing role membership.
+    // Grant the missing permission WITHOUT changing role membership and WITHOUT
+    // touching the cache. The role_permissions insert bumps the company authz
+    // version, so the very next check targets a new cache key and re-reads the DB.
     await addPermissionToRole(ctx.prisma, 'CACHE_ROLE', 'order:approve');
 
-    // Still denied while the cache holds the old set (clock frozen ⇒ no TTL expiry).
+    // Allowed at once — clock frozen ⇒ this cannot be TTL expiry, only the version
+    // anchor (PG-004). The previous stale negative entry is structurally unreachable.
     await request(ctx.http)
       .get(`${BASE}/test-authz/multiple`)
       .set('Authorization', `Bearer ${token}`)
-      .expect(403);
+      .expect(200);
 
-    // After invalidation the fresh PostgreSQL state is visible.
+    // The explicit invalidate hook remains available (and harmless) for callers.
     await ctx.permissionCache.invalidate(user.id);
     await request(ctx.http)
       .get(`${BASE}/test-authz/multiple`)

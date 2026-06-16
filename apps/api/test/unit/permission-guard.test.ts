@@ -37,10 +37,17 @@ function appGuardClasses(moduleClass: object): unknown[] {
     .map((p) => p.useClass);
 }
 
-/** Minimal fake repository so the service test needs no database. */
+/** Minimal fake repository so the service test needs no database. The authz
+ * version is held constant here so these unit tests isolate the role-version /
+ * TTL behaviour; the DB-sourced version anchor is exercised by the real-PostgreSQL
+ * integration suites (authz-cache-version). */
 class FakeRepo {
   calls = 0;
+  authzVersion = 1n;
   constructor(private codes: string[]) {}
+  async loadAuthzVersion(): Promise<bigint> {
+    return this.authzVersion;
+  }
   async loadEffectivePermissionCodes(): Promise<string[]> {
     this.calls += 1;
     return this.codes;

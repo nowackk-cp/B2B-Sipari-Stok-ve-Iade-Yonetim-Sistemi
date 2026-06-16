@@ -5,16 +5,24 @@
  * for a user's effective permissions, and the system MUST behave correctly with
  * the cache empty or absent (a cold/cleared cache simply forces a fresh DB load).
  *
- * Entries are keyed by `(companyId, userId, securityVersion)`. The leading
- * `companyId` keeps tenants isolated: two companies that happen to use the same
- * numeric userId can never read each other's cached permission set (TASK-010b).
- * The security version encodes the user's current role membership, so a role
- * assignment change yields a new key and never reads a stale entry; finer-grained
- * changes (a permission added to an already-assigned role) are bounded by the
- * adapter's short TTL and the explicit
- * {@link PermissionCache.invalidate}/{@link PermissionCache.clear} hooks. The
- * production binding may be Redis (short-lived only); Redis is never
- * authoritative for security state.
+ * Entries are keyed by `(companyId, userId, version)`, where `version` is the
+ * composite `"<authorizationVersion>:<securityVersion>"` produced by
+ * {@link PermissionService} — so the full key is
+ * `companyId:userId:authzVersion:securityVersion`. The leading `companyId` keeps
+ * tenants isolated: two companies that happen to use the same numeric userId can
+ * never read each other's cached permission set (TASK-010b).
+ *
+ * The PRIMARY freshness anchor is `authorizationVersion`: a per-company monotonic
+ * counter that PostgreSQL bumps in-transaction on EVERY permission-affecting
+ * change (a grant added/removed, a role dropped, a user disabled, an assignment
+ * changed). Because the caller loads that counter from PostgreSQL before every
+ * lookup, a moved version yields a brand-new key and a stale entry — even one
+ * sitting in another instance's separate in-memory cache — is structurally
+ * unreachable, with NO local clear required (PG-004). The `securityVersion`
+ * (a digest of current role membership) is a secondary guard. The TTL and the
+ * explicit {@link PermissionCache.invalidate}/{@link PermissionCache.clear} hooks
+ * remain as optimizations only. The production binding may be Redis (short-lived
+ * only); Redis is never authoritative for security state.
  */
 export interface PermissionCache {
   /** Cached set for `(companyId, userId, version)`, or null on miss. */

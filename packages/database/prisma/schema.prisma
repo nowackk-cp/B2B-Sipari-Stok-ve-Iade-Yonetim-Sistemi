@@ -217,8 +217,37 @@ model Company {
   // global/assignable without a company — tenant isolation is a DB invariant.
   users         User[]
   roles         Role[]
+  // Authorization cache version (PG-004): the per-company monotonic counter that
+  // anchors the effective-permission cache key. Maintained entirely by DB
+  // triggers (migration 20260616030000_authorization_cache_version).
+  authzVersion  CompanyAuthzVersion?
 
   @@map("companies")
+}
+
+/// Per-company authorization version (PG-004).
+///
+/// A single monotonic counter per company that participates in the
+/// effective-permission cache key (`companyId:userId:authzVersion:securityVersion`).
+/// Every change that can alter a user's effective permissions (user_roles,
+/// role_permissions, role and permission-relevant user changes) bumps the owning
+/// company's counter inside the SAME transaction as the change, via DB triggers —
+/// so the bump commits/rolls back atomically and reaches every API instance
+/// (PostgreSQL is the single source of truth, never a JWT claim). A reader loads
+/// the current value before each cache lookup; once it moves, the old key can
+/// never be read again on ANY node, even without an explicit local cache clear.
+///
+/// Rows are created by trigger for every company (AFTER INSERT) and backfilled
+/// for existing ones; the `version`/`updated_at` columns are written ONLY by the
+/// triggers, never by application code.
+model CompanyAuthzVersion {
+  companyId BigInt   @id @map("company_id")
+  version   BigInt   @default(1)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("company_authz_versions")
 }
 
 model SystemSetting {
