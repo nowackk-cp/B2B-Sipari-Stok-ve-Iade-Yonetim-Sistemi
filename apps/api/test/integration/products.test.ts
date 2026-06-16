@@ -394,4 +394,103 @@ describe('Products catalog (integration, real PostgreSQL)', () => {
     expect(audit.entityType).toBe('product');
     expect(audit.requestId).toBeTruthy();
   });
+
+  // --- BLOCKER 1: BIGINT-safe numeric validation (no DB-overflow 500s) --------
+
+  const OVER_BIGINT = '99999999999999999999'; // 20 digits, > 2^63-1
+  const PG_BIGINT_MAX = '9223372036854775807'; // exactly 2^63-1
+
+  /** Every invalid-numeric body must be a 400 RFC7807 with a requestId — and in
+   * particular NEVER a 500 (the boundary, not PostgreSQL, rejects it). */
+  async function expectValidation400(token: string, body: Record<string, unknown>): Promise<void> {
+    const res = await request(ctx.http)
+      .post(PRODUCTS)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.headers['content-type']).toContain('application/problem+json');
+    expect(res.body).toMatchObject({ status: 400, code: 'VALIDATION_ERROR' });
+    expect(typeof res.body.requestId).toBe('string');
+    expect(res.body.requestId.length).toBeGreaterThan(0);
+  }
+
+  it('17. listPrice.amount above the bigint max is a 400 (not a 500)', async () => {
+    const { token } = await makeCatalogUser(ctx);
+    await expectValidation400(token, {
+      sku: 'OVF-1',
+      name: 'Overflow',
+      listPrice: { amount: OVER_BIGINT, currency: 'TRY' },
+    });
+  });
+
+  it('18. criticalStockThreshold above the bigint max is a 400 (not a 500)', async () => {
+    const { token } = await makeCatalogUser(ctx);
+    await expectValidation400(token, {
+      sku: 'OVF-2',
+      name: 'Overflow',
+      criticalStockThreshold: OVER_BIGINT,
+    });
+  });
+
+  it('19. the exact bigint max is accepted for amount and threshold', async () => {
+    const { token } = await makeCatalogUser(ctx);
+    const res = await request(ctx.http)
+      .post(PRODUCTS)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        sku: 'MAX-1',
+        name: 'AtMax',
+        listPrice: { amount: PG_BIGINT_MAX, currency: 'TRY' },
+        criticalStockThreshold: PG_BIGINT_MAX,
+      })
+      .expect(201);
+    expect(res.body.listPrice).toEqual({ amount: PG_BIGINT_MAX, currency: 'TRY' });
+    expect(res.body.criticalStockThreshold).toBe(PG_BIGINT_MAX);
+  });
+
+  it('20. negative, decimal and empty numeric strings are rejected with 400', async () => {
+    const { token } = await makeCatalogUser(ctx);
+    await expectValidation400(token, {
+      sku: 'NEG-1',
+      name: 'Neg',
+      listPrice: { amount: '-1', currency: 'TRY' },
+    });
+    await expectValidation400(token, {
+      sku: 'DEC-1',
+      name: 'Dec',
+      listPrice: { amount: '12.5', currency: 'TRY' },
+    });
+    await expectValidation400(token, {
+      sku: 'EMPTY-1',
+      name: 'Empty',
+      listPrice: { amount: '', currency: 'TRY' },
+    });
+    await expectValidation400(token, {
+      sku: 'NEG-2',
+      name: 'NegThreshold',
+      criticalStockThreshold: '-5',
+    });
+    await expectValidation400(token, {
+      sku: 'DEC-2',
+      name: 'DecThreshold',
+      criticalStockThreshold: '3.14',
+    });
+  });
+
+  it('21. an over-range value on UPDATE is also a 400 (not a 500)', async () => {
+    const { token } = await makeCatalogUser(ctx);
+    const created = await request(ctx.http)
+      .post(PRODUCTS)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ sku: 'UPD-1', name: 'ToUpdate' })
+      .expect(201);
+
+    const res = await request(ctx.http)
+      .patch(`${PRODUCTS}/${created.body.id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ criticalStockThreshold: OVER_BIGINT });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ status: 400, code: 'VALIDATION_ERROR' });
+    expect(res.body.requestId).toBeTruthy();
+  });
 });

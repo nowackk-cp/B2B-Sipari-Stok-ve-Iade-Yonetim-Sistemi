@@ -11,7 +11,14 @@ import {
   Query,
   Req,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiCreatedResponse,
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Request } from 'express';
 import type { ProductListView, ProductView } from '@b2b/contracts';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -22,6 +29,7 @@ import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQuery } from './dto/list-products.query';
+import { ProductListResponse, ProductResponse } from './dto/product-response.dto';
 
 /**
  * Product catalog REST surface (TASK-011).
@@ -32,6 +40,10 @@ import { ListProductsQuery } from './dto/list-products.query';
  * `@RequirePermissions`, so coverage cannot drift behind a forgotten local guard
  * (PERMISSION_MATRIX §3). The owning tenant is always the principal's real
  * company (DB-resolved), never the request body.
+ *
+ * Response schemas are documented with explicit `@Api*Response({ type })` models
+ * (the contract interfaces carry no runtime metadata) so generated OpenAPI bodies
+ * are non-empty; the runtime shape is unchanged (PRODUCT-CATALOG review BLOCKER 2).
  */
 @ApiTags('products')
 @ApiBearerAuth()
@@ -43,6 +55,7 @@ export class ProductsController {
   @HttpCode(HttpStatus.CREATED)
   @RequirePermissions('product:create')
   @ApiOperation({ summary: 'Create a product in the caller’s company.' })
+  @ApiCreatedResponse({ type: ProductResponse, description: 'The created product.' })
   create(
     @CurrentUser() principal: AuthPrincipal,
     @Body() dto: CreateProductDto,
@@ -54,6 +67,7 @@ export class ProductsController {
   @Get()
   @RequirePermissions('product:read')
   @ApiOperation({ summary: 'List/search the caller’s company products (paginated).' })
+  @ApiOkResponse({ type: ProductListResponse, description: 'A page of products.' })
   list(
     @CurrentUser() principal: AuthPrincipal,
     @Query() query: ListProductsQuery,
@@ -64,6 +78,7 @@ export class ProductsController {
   @Get(':id')
   @RequirePermissions('product:read')
   @ApiOperation({ summary: 'Get one product by public id.' })
+  @ApiOkResponse({ type: ProductResponse, description: 'The product.' })
   getOne(@CurrentUser() principal: AuthPrincipal, @Param('id') id: string): Promise<ProductView> {
     return this.products.getOne(principal, id);
   }
@@ -71,6 +86,7 @@ export class ProductsController {
   @Patch(':id')
   @RequirePermissions('product:update')
   @ApiOperation({ summary: 'Update a product in the caller’s company.' })
+  @ApiOkResponse({ type: ProductResponse, description: 'The updated product.' })
   update(
     @CurrentUser() principal: AuthPrincipal,
     @Param('id') id: string,
@@ -84,6 +100,7 @@ export class ProductsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermissions('product:delete')
   @ApiOperation({ summary: 'Soft-delete a product in the caller’s company.' })
+  @ApiNoContentResponse({ description: 'The product was soft-deleted (no content).' })
   remove(
     @CurrentUser() principal: AuthPrincipal,
     @Param('id') id: string,

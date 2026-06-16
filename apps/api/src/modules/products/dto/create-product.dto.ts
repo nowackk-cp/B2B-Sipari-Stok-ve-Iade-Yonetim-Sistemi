@@ -6,13 +6,13 @@ import {
   IsNumberString,
   IsOptional,
   IsString,
-  Matches,
   Max,
   MaxLength,
   Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsBigIntString } from '../../../common/validation/is-bigint-string.decorator';
 import { MoneyInputDto } from './money.dto';
 
 /**
@@ -99,10 +99,10 @@ export class CreateProductDto {
   @ApiPropertyOptional({
     nullable: true,
     example: '10',
-    description: 'Low-stock alert threshold (non-negative integer string) or null.',
+    description:
+      'Low-stock alert threshold (non-negative integer string, 0..9223372036854775807) or null.',
   })
   @IsOptional()
-  @Matches(/^\d+$/, { message: 'criticalStockThreshold must be a non-negative integer string' })
-  @MaxLength(20)
+  @IsBigIntString()
   criticalStockThreshold?: string | null;
 }
