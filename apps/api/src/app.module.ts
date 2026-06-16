@@ -16,6 +16,7 @@ import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
 import { AuthorizationModule } from './modules/authorization/authorization.module';
 import { PermissionGuard } from './modules/authorization/guards/permission.guard';
 import { ProductsModule } from './modules/products/products.module';
+import { WarehousesModule } from './modules/warehouses/warehouses.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ProductsModule } from './modules/products/products.module';
     SessionsModule,
     AuthorizationModule,
     ProductsModule,
+    WarehousesModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

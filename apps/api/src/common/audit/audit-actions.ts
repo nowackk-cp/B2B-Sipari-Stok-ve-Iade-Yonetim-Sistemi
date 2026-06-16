@@ -20,6 +20,11 @@ export const AUDIT_ACTIONS = {
   PRODUCT_CREATED: 'PRODUCT_CREATED',
   PRODUCT_UPDATED: 'PRODUCT_UPDATED',
   PRODUCT_DELETED: 'PRODUCT_DELETED',
+  // Warehouses (TASK-012): warehouse master-data mutations. Each writes a
+  // business audit row inside the SAME transaction as the change (ADR-007).
+  WAREHOUSE_CREATED: 'WAREHOUSE_CREATED',
+  WAREHOUSE_UPDATED: 'WAREHOUSE_UPDATED',
+  WAREHOUSE_DELETED: 'WAREHOUSE_DELETED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -93,17 +93,16 @@ async function main() {
   };
   requirePartial('customer_addresses_default_per_type_key', ['is_default', 'deleted_at']);
   requirePartial('import_jobs_active_checksum_key', ['status', 'UPLOADED', 'IMPORTING']);
-  for (const name of [
-    'users_email_key',
-    'warehouses_code_key',
-    'customers_code_key',
-    'categories_slug_key',
-  ]) {
+  for (const name of ['users_email_key', 'customers_code_key', 'categories_slug_key']) {
     requirePartial(name, ['deleted_at']);
   }
   // TASK-011: the product SKU unique is COMPANY-SCOPED + soft-delete partial, so a
   // SKU is unique only among a company's active products and reusable after delete.
   requirePartial('products_sku_key', ['deleted_at', 'company_id']);
+  // TASK-012: the warehouse code unique is likewise COMPANY-SCOPED + soft-delete
+  // partial, so a code is unique only among a company's active warehouses and
+  // reusable after soft delete.
+  requirePartial('warehouses_code_key', ['deleted_at', 'company_id']);
 
   // 4. CHECK constraints.
   const checks = await prisma.$queryRawUnsafe(`

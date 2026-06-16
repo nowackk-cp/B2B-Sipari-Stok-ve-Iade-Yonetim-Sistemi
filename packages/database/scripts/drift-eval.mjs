@@ -12,7 +12,7 @@ export const ALLOWED_DRIFT_STATEMENTS = [
   'CREATE UNIQUE INDEX "customers_code_key" ON "customers"("code")',
   'CREATE UNIQUE INDEX "products_sku_key" ON "products"("company_id", "sku")',
   'CREATE UNIQUE INDEX "users_email_key" ON "users"("email")',
-  'CREATE UNIQUE INDEX "warehouses_code_key" ON "warehouses"("code")',
+  'CREATE UNIQUE INDEX "warehouses_code_key" ON "warehouses"("company_id", "code")',
 ];
 
 export function normalize(sql) {

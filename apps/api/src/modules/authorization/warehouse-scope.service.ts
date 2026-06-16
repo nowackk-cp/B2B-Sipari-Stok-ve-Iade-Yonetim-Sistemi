@@ -119,6 +119,35 @@ export class WarehouseScopeService {
     const actor = await this.resolveActor(actorUserId, executor);
     return actor?.permissions.has(WAREHOUSE_SCOPE_ALL) ?? false;
   }
+
+  /**
+   * Resolve the actor's warehouse-access envelope for a LIST query: their own
+   * tenant, whether they hold global scope (`warehouse:scope:all`) and the exact
+   * set of explicitly-scoped warehouse ids — all from PostgreSQL (never a JWT
+   * claim). Returns null when the actor cannot act (missing/suspended/deleted),
+   * which the caller treats as "no accessible warehouses" (deny-by-default).
+   *
+   * This is the list-shaped companion to {@link canAccessWarehouseForPermission}
+   * (which decides a single warehouse): a warehouse-management list endpoint uses
+   * it to show ONLY the warehouses the actor may see — every same-company
+   * warehouse when global, otherwise just the explicitly-scoped ones.
+   */
+  async resolveWarehouseAccess(
+    actorUserId: bigint,
+    executor?: DbClient,
+  ): Promise<{
+    companyId: bigint;
+    global: boolean;
+    scopedWarehouseIds: ReadonlySet<bigint>;
+  } | null> {
+    const actor = await this.resolveActor(actorUserId, executor);
+    if (!actor) return null;
+    return {
+      companyId: actor.companyId,
+      global: actor.permissions.has(WAREHOUSE_SCOPE_ALL),
+      scopedWarehouseIds: actor.scopedWarehouseIds,
+    };
+  }
 }
 
 // Stable deny results for the "could not resolve a row" cases — denies (never
