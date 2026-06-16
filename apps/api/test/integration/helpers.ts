@@ -305,6 +305,44 @@ export async function grantPermissionsViaRole(
   await prisma.userRole.create({ data: { userId, roleId: role.id, companyId } });
 }
 
+let warehouseSeq = 0;
+
+/** Create a warehouse in `companyId` (warehouses are company-scoped). */
+export async function createWarehouse(
+  prisma: PrismaClient,
+  companyId: bigint,
+  over: Partial<{ code: string; isActive: boolean; deletedAt: Date | null }> = {},
+): Promise<{ id: bigint; companyId: bigint }> {
+  warehouseSeq += 1;
+  const code = over.code ?? `WH_${Date.now().toString(36)}_${warehouseSeq}`;
+  const wh = await prisma.warehouse.create({
+    data: {
+      companyId,
+      code,
+      name: code,
+      country: 'TR',
+      isActive: over.isActive ?? true,
+      deletedAt: over.deletedAt ?? null,
+    },
+    select: { id: true, companyId: true },
+  });
+  return wh;
+}
+
+/** Grant `userId` an explicit warehouse scope (same tenant — composite FKs enforce it). */
+export async function assignWarehouseScope(
+  prisma: PrismaClient,
+  userId: bigint,
+  warehouseId: bigint,
+  companyId: bigint,
+): Promise<void> {
+  await prisma.userWarehouseScope.upsert({
+    where: { userId_warehouseId: { userId, warehouseId } },
+    update: {},
+    create: { userId, warehouseId, companyId, grantedById: userId },
+  });
+}
+
 /** Add a single permission to an existing role (no role-membership change) —
  * used to prove the permission cache must be invalidated to see the change. */
 export async function addPermissionToRole(

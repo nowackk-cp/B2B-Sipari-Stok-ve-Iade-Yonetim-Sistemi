@@ -157,12 +157,20 @@ export async function seed(
     );
 
     // 5. Default warehouse — find-or-create (partial-unique code → manual).
+    //    Warehouses are company-scoped (TASK-010c): the default warehouse belongs
+    //    to the default company. No role gets implicit scope to it; access is only
+    //    via an explicit user_warehouse_scopes row or protected warehouse:scope:all.
     let warehouse = await tx.warehouse.findFirst({
       where: { code: DEFAULT_WAREHOUSE_CODE, deletedAt: null },
     });
     if (!warehouse) {
       warehouse = await tx.warehouse.create({
-        data: { code: DEFAULT_WAREHOUSE_CODE, name: 'Main Warehouse', country: 'TR' },
+        data: {
+          companyId: company.id,
+          code: DEFAULT_WAREHOUSE_CODE,
+          name: 'Main Warehouse',
+          country: 'TR',
+        },
       });
     }
 

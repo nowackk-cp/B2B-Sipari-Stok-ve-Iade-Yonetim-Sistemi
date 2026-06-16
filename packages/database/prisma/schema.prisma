@@ -217,6 +217,10 @@ model Company {
   // global/assignable without a company — tenant isolation is a DB invariant.
   users         User[]
   roles         Role[]
+  // Warehouse scope (TASK-010c): warehouses are company-scoped so a user's
+  // warehouse access can never straddle tenants. Composite FKs on
+  // user_warehouse_scopes pin user.company_id = warehouse.company_id.
+  warehouses    Warehouse[]
   // Authorization cache version (PG-004): the per-company monotonic counter that
   // anchors the effective-permission cache key. Maintained entirely by DB
   // triggers (migration 20260616030000_authorization_cache_version).
@@ -500,19 +504,41 @@ model UserRole {
 // M3 Scope
 // ---------------------------------------------------------------------------
 
+// Explicit, per-warehouse access grant (TASK-010c / SECURITY_MODEL §3). A user's
+// warehouse access comes ONLY from (1) a row here or (2) the protected
+// `warehouse:scope:all` permission — never implicitly from a role name (ADMIN
+// included). `companyId` is carried explicitly so the two composite FKs below
+// force user.company_id = warehouse.company_id = this value at the DB level: a
+// cross-company grant (user in A, warehouse in B) is physically un-insertable,
+// not merely rejected by application code.
+//
+// Hard delete (no `deletedAt`): a scope grant is current-state authorization
+// data, not an append-only ledger/audit row. Revocation removes the row; the
+// change is invalidated immediately by the per-company `authzVersion` bump
+// trigger (and surfaced by security logging in the management layer). This
+// mirrors how `user_roles` assignments are managed. The PK (user_id,
+// warehouse_id) makes a duplicate active grant impossible.
 model UserWarehouseScope {
   userId      BigInt   @map("user_id")
   warehouseId BigInt   @map("warehouse_id")
+  // Tenant the grant belongs to (NOT NULL). Shared key of both composite FKs.
+  companyId   BigInt   @map("company_id")
   scopeType   String   @default("EXPLICIT") @map("scope_type")
-  grantedById BigInt   @map("granted_by")
+  // Who created the grant. Nullable + SetNull so removing the granter never
+  // silently erases the grant nor blocks the granter's own lifecycle.
+  grantedById BigInt?  @map("granted_by")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  user      User      @relation("UserWarehouseScopeUser", fields: [userId], references: [id], onDelete: Cascade)
-  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
-  grantedBy User      @relation("UserWarehouseScopeGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  // Composite FKs pin both endpoints to the SAME company. onDelete: Restrict —
+  // hard-deleting a user/warehouse that still owns a scope is REFUSED, never a
+  // silent cascade that drops the authorization grant (SECURITY_MODEL §3, rule 5).
+  user      User      @relation("UserWarehouseScopeUser", fields: [userId, companyId], references: [id, companyId], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  grantedBy User?     @relation("UserWarehouseScopeGrantedBy", fields: [grantedById], references: [id], onDelete: SetNull)
 
   @@id([userId, warehouseId])
   @@index([warehouseId])
+  @@index([companyId])
   @@map("user_warehouse_scopes")
 }
 
@@ -580,6 +606,10 @@ model Product {
 model Warehouse {
   id           BigInt    @id @default(autoincrement())
   publicId     String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  // Owning tenant (NOT NULL). Warehouses are company-scoped so warehouse access
+  // never crosses tenants; the (id, company_id) unique below is the composite-FK
+  // target that user_warehouse_scopes pins against (TASK-010c).
+  companyId    BigInt    @map("company_id")
   code         String
   name         String
   addressLine1 String?   @map("address_line1")
@@ -592,6 +622,7 @@ model Warehouse {
   updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(6)
 
+  company            Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
   stockBalances      StockBalance[]
   stockLedgerEntries StockLedger[]
   reservations       StockReservation[]
@@ -601,6 +632,10 @@ model Warehouse {
   orders             Order[]
 
   @@unique([code])
+  // Composite-FK target so user_warehouse_scopes.(warehouse_id, company_id)
+  // references it and pins every scope to the warehouse's own tenant.
+  @@unique([id, companyId])
+  @@index([companyId])
   @@map("warehouses")
 }
 

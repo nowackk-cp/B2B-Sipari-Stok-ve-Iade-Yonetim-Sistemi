@@ -38,10 +38,16 @@ export async function makeUser(
   });
 }
 
-export async function makeWarehouse(prisma: PrismaClient, over: Partial<{ code: string }> = {}) {
+export async function makeWarehouse(
+  prisma: PrismaClient,
+  over: Partial<{ code: string; companyId: bigint }> = {},
+) {
   const s = uniqueSuffix();
+  // Warehouses are company-scoped (company_id NOT NULL). Attach a fresh tenant
+  // unless the caller pins one, so factory warehouses never collide on company.
+  const companyId = over.companyId ?? (await makeCompany(prisma)).id;
   return prisma.warehouse.create({
-    data: { code: over.code ?? `WH_${s}`, name: `Warehouse ${s}`, country: 'TR' },
+    data: { companyId, code: over.code ?? `WH_${s}`, name: `Warehouse ${s}`, country: 'TR' },
   });
 }
 

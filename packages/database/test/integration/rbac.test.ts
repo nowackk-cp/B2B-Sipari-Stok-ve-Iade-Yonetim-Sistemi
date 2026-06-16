@@ -46,15 +46,29 @@ describe('RBAC persistence', () => {
   });
 
   it('rejects a duplicate warehouse scope row', async () => {
-    const granter = await makeUser(prisma);
-    const user = await makeUser(prisma);
-    const warehouse = await makeWarehouse(prisma);
+    // Warehouse scopes are company-pinned: user, warehouse and scope share one
+    // tenant (composite FKs enforce it). A second row for the same (user,
+    // warehouse) is rejected by the PK.
+    const company = await makeCompany(prisma);
+    const granter = await makeUser(prisma, { companyId: company.id });
+    const user = await makeUser(prisma, { companyId: company.id });
+    const warehouse = await makeWarehouse(prisma, { companyId: company.id });
     await prisma.userWarehouseScope.create({
-      data: { userId: user.id, warehouseId: warehouse.id, grantedById: granter.id },
+      data: {
+        userId: user.id,
+        warehouseId: warehouse.id,
+        companyId: company.id,
+        grantedById: granter.id,
+      },
     });
     await expect(
       prisma.userWarehouseScope.create({
-        data: { userId: user.id, warehouseId: warehouse.id, grantedById: granter.id },
+        data: {
+          userId: user.id,
+          warehouseId: warehouse.id,
+          companyId: company.id,
+          grantedById: granter.id,
+        },
       }),
     ).rejects.toThrow();
   });

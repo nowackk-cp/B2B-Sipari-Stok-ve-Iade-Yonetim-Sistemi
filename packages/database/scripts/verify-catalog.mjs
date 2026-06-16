@@ -51,6 +51,9 @@ async function main() {
     'authz_bump_role_permissions',
     'authz_bump_roles',
     'authz_bump_users',
+    // TASK-010c: a granted/revoked warehouse scope is an authz input and must bump
+    // the owning company's version in-transaction, like a role/permission change.
+    'authz_bump_user_warehouse_scopes',
   ]) {
     if (!triggerNames.has(name)) fail(`missing authorization-version trigger: ${name}`);
   }
@@ -152,6 +155,13 @@ async function main() {
     // erased (migration 20260616020000_rbac_user_roles_delete_restrict).
     'user_roles_user_id_company_id_fkey',
     'user_roles_role_id_company_id_fkey',
+    // TASK-010c: warehouse-scope tenancy. The warehouse→company FK and the two
+    // company-pinned composite FKs on user_warehouse_scopes must RESTRICT, so a
+    // hard delete of a user/warehouse that still owns a scope is refused rather
+    // than silently dropping the authorization grant (SECURITY_MODEL §3, rule 5).
+    'warehouses_company_id_fkey',
+    'user_warehouse_scopes_user_id_company_id_fkey',
+    'user_warehouse_scopes_warehouse_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
@@ -171,6 +181,10 @@ async function main() {
   // Authorization cache version counter (PG-004).
   requireCol('company_authz_versions.company_id', { notNull: true });
   requireCol('company_authz_versions.version', { notNull: true });
+  // Warehouse scope tenancy (TASK-010c): both sides carry a NOT NULL company_id so
+  // the composite FKs can pin user.company = warehouse.company = scope.company.
+  requireCol('warehouses.company_id', { notNull: true });
+  requireCol('user_warehouse_scopes.company_id', { notNull: true });
   requireCol('import_jobs.company_id', { notNull: true });
   requireCol('import_jobs.replay_of_import_id');
   requireCol('import_jobs.attempt_number', { notNull: true });
