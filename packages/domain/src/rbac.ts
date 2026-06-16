@@ -18,6 +18,23 @@
  */
 export const WAREHOUSE_SCOPE_ALL = 'warehouse:scope:all' as const;
 
+/**
+ * Grant-management permission codes referenced by the grant-ceiling policy.
+ *
+ * - {@link ROLE_MANAGE_PERMISSION} / {@link USER_ASSIGN_ROLE_PERMISSION}: the
+ *   non-protected base capability to manage role grants / assign roles. ADMIN
+ *   holds both in seed, bounded at runtime by the grant ceiling.
+ * - {@link PROTECTED_GRANT_PERMISSION}: the right to *touch* a protected role or
+ *   a protected permission. It is an ALIAS of the existing catalog permission
+ *   `role:manage:protected` (no new permission is introduced). Holding it is
+ *   necessary but NOT sufficient: the actor must still be in-tenant and stay
+ *   within their own effective-permission/privilege ceiling.
+ */
+export const ROLE_MANAGE_PERMISSION = 'role:manage' as const;
+export const ROLE_MANAGE_PROTECTED_PERMISSION = 'role:manage:protected' as const;
+export const USER_ASSIGN_ROLE_PERMISSION = 'user:assign-role' as const;
+export const PROTECTED_GRANT_PERMISSION = ROLE_MANAGE_PROTECTED_PERMISSION;
+
 /** Permission grouping (UI grouping + protected policy bucket). */
 export const PERMISSION_GROUPS = [
   'IDENTITY',
