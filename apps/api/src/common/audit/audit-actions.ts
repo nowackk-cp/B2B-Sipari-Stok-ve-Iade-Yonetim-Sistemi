@@ -25,6 +25,10 @@ export const AUDIT_ACTIONS = {
   WAREHOUSE_CREATED: 'WAREHOUSE_CREATED',
   WAREHOUSE_UPDATED: 'WAREHOUSE_UPDATED',
   WAREHOUSE_DELETED: 'WAREHOUSE_DELETED',
+  // Inventory (Stock Ledger Foundation): a manual stock adjustment writes its
+  // business audit row inside the SAME transaction as the balance change + the
+  // append-only ledger movement (ADR-007, DATABASE_DESIGN §18 "Stok düzeltme").
+  STOCK_ADJUSTED: 'STOCK_ADJUSTED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

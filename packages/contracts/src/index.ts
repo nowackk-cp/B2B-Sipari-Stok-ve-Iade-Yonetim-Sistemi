@@ -5,3 +5,4 @@ export * from './health';
 export * from './auth';
 export * from './products';
 export * from './warehouses';
+export * from './inventory';
