@@ -592,4 +592,113 @@ describe('Order draft foundation (integration, real PostgreSQL)', () => {
     expect(res.body).toMatchObject({ status: 404, code: 'NOT_FOUND' });
     expect(res.body.requestId).toBeTruthy();
   });
+
+  // --- DRAFT-only update invariant (concurrency) ----------------------------
+
+  it('29. a failed (post-cancel) PATCH mutates nothing and writes no ORDER_UPDATED audit', async () => {
+    const f = await fixture(ctx);
+    const created = await post(ctx, f.actor.token, body(f)).expect(201);
+    const id = created.body.id as string;
+    // Cancel first, then attempt a PATCH — the DRAFT-only guard rejects it.
+    await request(ctx.http)
+      .post(`${ORDERS}/${id}/cancel`)
+      .set('Authorization', `Bearer ${f.actor.token}`)
+      .send({})
+      .expect(200);
+    const p2 = await createPricedProduct(ctx, f.companyId, { listPriceAmount: 5000n });
+    await request(ctx.http)
+      .patch(`${ORDERS}/${id}`)
+      .set('Authorization', `Bearer ${f.actor.token}`)
+      .send({ note: 'nope', items: [{ productId: p2.publicId, quantity: '9' }] })
+      .expect(409);
+
+    // The cancelled order is untouched: original note/items survive.
+    const row = await ctx.prisma.order.findUniqueOrThrow({
+      where: { publicId: id },
+      select: { id: true, status: true, notes: true, items: { select: { quantity: true } } },
+    });
+    expect(row.status).toBe('CANCELLED');
+    expect(row.notes).toBe('A note');
+    expect(row.items.map((i) => i.quantity)).toEqual([2n]);
+    // No ORDER_UPDATED audit was written for the rejected PATCH.
+    expect(
+      await ctx.prisma.auditLog.count({ where: { action: 'ORDER_UPDATED', entityId: row.id } }),
+    ).toBe(0);
+    // Cancel audit behaviour is unaffected (exactly one ORDER_CANCELLED row).
+    expect(
+      await ctx.prisma.auditLog.count({ where: { action: 'ORDER_CANCELLED', entityId: row.id } }),
+    ).toBe(1);
+  });
+
+  it('30. concurrent PATCH vs cancel never mutates a cancelled order', async () => {
+    const f = await fixture(ctx);
+    const p2 = await createPricedProduct(ctx, f.companyId, { listPriceAmount: 5000n });
+    let sawConflict = false;
+    let sawPatchWin = false;
+
+    // Real cancel-vs-PATCH race over independent orders. The cancel always settles
+    // (PATCH never leaves DRAFT), so the order always ends CANCELLED; the only
+    // question is whether PATCH committed before the cancel (200, applied while
+    // DRAFT) or lost the race (409, applied to nothing).
+    for (let i = 0; i < 12; i += 1) {
+      const created = await post(ctx, f.actor.token, body(f)).expect(201);
+      const id = created.body.id as string;
+
+      const [patchRes, cancelRes] = await Promise.all([
+        request(ctx.http)
+          .patch(`${ORDERS}/${id}`)
+          .set('Authorization', `Bearer ${f.actor.token}`)
+          .send({ note: 'patched', items: [{ productId: p2.publicId, quantity: '5' }] }),
+        request(ctx.http)
+          .post(`${ORDERS}/${id}/cancel`)
+          .set('Authorization', `Bearer ${f.actor.token}`)
+          .send({}),
+      ]);
+
+      // Cancel always wins the lifecycle: the order ends CANCELLED, and a PATCH
+      // either committed first (200) or was rejected by the DB guard (409).
+      expect(cancelRes.status).toBe(200);
+      expect([200, 409]).toContain(patchRes.status);
+
+      const row = await ctx.prisma.order.findUniqueOrThrow({
+        where: { publicId: id },
+        select: { id: true, status: true, notes: true, items: { select: { quantity: true } } },
+      });
+      expect(row.status).toBe('CANCELLED');
+
+      const history = await ctx.prisma.orderStatusHistory.findMany({
+        where: { orderId: row.id },
+        orderBy: { id: 'asc' },
+        select: { toStatus: true },
+      });
+      expect(history.map((h) => h.toStatus)).toEqual(['DRAFT', 'CANCELLED']);
+
+      const updatedAudits = await ctx.prisma.auditLog.count({
+        where: { action: 'ORDER_UPDATED', entityId: row.id },
+      });
+      const cancelAudits = await ctx.prisma.auditLog.count({
+        where: { action: 'ORDER_CANCELLED', entityId: row.id },
+      });
+      expect(cancelAudits).toBe(1);
+
+      if (patchRes.status === 409) {
+        sawConflict = true;
+        // PATCH lost: the cancelled order must show the ORIGINAL content, and no
+        // ORDER_UPDATED audit may exist for the rejected edit.
+        expect(row.notes).toBe('A note');
+        expect(row.items.map((it) => it.quantity)).toEqual([2n]);
+        expect(updatedAudits).toBe(0);
+      } else {
+        sawPatchWin = true;
+        // PATCH won (committed while still DRAFT): its content stuck, then cancel ran.
+        expect(row.notes).toBe('patched');
+        expect(row.items.map((it) => it.quantity)).toEqual([5n]);
+        expect(updatedAudits).toBe(1);
+      }
+    }
+
+    // Sanity: the loop is wide enough that at least one ordering occurred. (Both
+    // orderings are valid and consistent; we only assert the race actually ran.)
+    expect(sawConflict || sawPatchWin).toBe(true);
+  }, 60_000);
 });

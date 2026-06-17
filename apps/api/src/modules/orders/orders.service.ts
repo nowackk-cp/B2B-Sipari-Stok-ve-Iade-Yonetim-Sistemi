@@ -153,6 +153,9 @@ export class OrdersService {
     const existing = await this.resolveOrThrow(actor.companyId, publicId);
     // Object-level scope on the order's CURRENT warehouse (out of scope → 404, hiding).
     await this.assertObjectScope(actor, existing.warehouseId);
+    // Fast-path 409 for the obvious already-non-DRAFT case. This is NOT the authority:
+    // the transaction below re-checks `status = 'DRAFT'` at the row level, so a cancel
+    // racing in after this read still cannot be overwritten (see updateOrder).
     if (existing.status !== 'DRAFT') {
       throw new ConflictException('Only DRAFT orders can be updated');
     }
@@ -186,7 +189,11 @@ export class OrdersService {
     if (dto.note !== undefined) data.notes = dto.note;
 
     const updated = await this.prisma.transaction(async (tx) => {
+      // Atomic expected-status guard: a 0-row update means a concurrent transition
+      // (e.g. cancel) moved the order out of DRAFT after the pre-check — 409, and the
+      // transaction rolls back so no items/audit are written for a post-cancel edit.
       const order = await this.repo.updateOrder(tx, existing.id, actor.companyId, data);
+      if (order === null) throw new ConflictException('Order is no longer DRAFT');
       await this.audit.write(tx, {
         action: AUDIT_ACTIONS.ORDER_UPDATED,
         actor: this.actorSnapshot(actor),

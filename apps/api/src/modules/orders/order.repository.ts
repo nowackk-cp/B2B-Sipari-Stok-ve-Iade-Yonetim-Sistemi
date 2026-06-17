@@ -265,6 +265,15 @@ export class OrderRepository {
    * When `items` is provided the existing lines are deleted and the new computed
    * lines inserted (the PATCH replaces the whole draft content — task rule 21).
    * Runs in the caller's transaction.
+   *
+   * The scalar write is an EXPECTED-STATUS conditional update (`updateMany` keyed by
+   * `{ id, status: 'DRAFT' }`), exactly like {@link cancelIfDraft}. The matching
+   * `UPDATE` takes a row lock, so a concurrent cancel cannot slip a DRAFT→CANCELLED
+   * transition in between a pre-check and this write: if the row is no longer DRAFT
+   * (e.g. a concurrent cancel committed first) the update affects 0 rows and we
+   * return `null` WITHOUT deleting/replacing any lines — the caller maps that to a
+   * 409 and the transaction rolls back. This keeps the DRAFT-only update invariant
+   * atomic with the line replacement (CLAUDE rule 15 / ORDER_RULES §1a).
    */
   async updateOrder(
     tx: DbClient,
@@ -280,9 +289,9 @@ export class OrderRepository {
       notes?: string | null;
       items?: OrderItemWriteData[];
     },
-  ): Promise<OrderRow> {
-    await tx.order.update({
-      where: { id },
+  ): Promise<OrderRow | null> {
+    const result = await tx.order.updateMany({
+      where: { id, status: 'DRAFT' },
       data: {
         customerId: data.customerId,
         warehouseId: data.warehouseId,
@@ -292,8 +301,8 @@ export class OrderRepository {
         grandTotalAmount: data.grandTotalAmount,
         notes: data.notes,
       },
-      select: { id: true },
     });
+    if (result.count === 0) return null; // no longer DRAFT (concurrent transition) → caller 409s.
     if (data.items !== undefined) {
       await tx.orderItem.deleteMany({ where: { orderId: id } });
       await this.insertItems(tx, id, companyId, data.items);
