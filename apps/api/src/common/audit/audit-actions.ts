@@ -39,6 +39,12 @@ export const AUDIT_ACTIONS = {
   CUSTOMER_CREATED: 'CUSTOMER_CREATED',
   CUSTOMER_UPDATED: 'CUSTOMER_UPDATED',
   CUSTOMER_DELETED: 'CUSTOMER_DELETED',
+  // Orders (Order Draft Foundation): DRAFT-order lifecycle mutations. Each writes
+  // a business audit row inside the SAME transaction as the change (ADR-007). No
+  // stock effect occurs in this slice (no reservation/ledger writes).
+  ORDER_CREATED: 'ORDER_CREATED',
+  ORDER_UPDATED: 'ORDER_UPDATED',
+  ORDER_CANCELLED: 'ORDER_CANCELLED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

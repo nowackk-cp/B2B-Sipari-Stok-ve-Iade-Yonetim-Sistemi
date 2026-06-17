@@ -229,6 +229,10 @@ model Company {
   // master data, same tenant model as products/warehouses. The same code may
   // exist across companies; within one company it is unique among active rows.
   customers     Customer[]
+  // Orders (Order Draft Foundation): orders are company-scoped transaction data.
+  // The order→company FK RESTRICTs, and the (id, company_id) composite-unique
+  // targets pin each order's customer/warehouse/items to the SAME tenant.
+  orders        Order[]
   // Authorization cache version (PG-004): the per-company monotonic counter that
   // anchors the effective-permission cache key. Maintained entirely by DB
   // triggers (migration 20260616030000_authorization_cache_version).
@@ -884,6 +888,10 @@ model Customer {
   // within one company an active code is unique while a soft-deleted customer
   // frees its code for reuse (matches the products SKU convention).
   @@unique([companyId, code], map: "customers_code_key")
+  // Composite-FK target so orders.(customer_id, company_id) references it and pins
+  // every order to its customer's own tenant (Order Draft Foundation), mirroring
+  // the warehouse/product (id, company_id) targets.
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([taxNumber])
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
@@ -919,6 +927,11 @@ model Order {
   id               BigInt      @id @default(autoincrement())
   publicId         String      @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
   orderNo          String      @unique @map("order_no")
+  // Owning tenant (NOT NULL). Orders are company-scoped transaction data; every
+  // list/get and all mutations are filtered by this company, resolved from the
+  // PostgreSQL principal — never a JWT claim (Order Draft Foundation). The
+  // composite FKs below pin the customer/warehouse to THIS company at the DB layer.
+  companyId        BigInt      @map("company_id")
   customerId       BigInt      @map("customer_id")
   warehouseId      BigInt      @map("warehouse_id")
   status           OrderStatus @default(DRAFT)
@@ -935,8 +948,13 @@ model Order {
   createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  warehouse  Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  // Tenant pin (Order Draft Foundation): the customer and warehouse are addressed
+  // by their (id, company_id) composite-unique so a cross-company customer/
+  // warehouse is physically un-insertable. onDelete: Restrict — a customer/
+  // warehouse that still owns an order cannot be hard-deleted.
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  customer   Customer  @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Restrict)
+  warehouse  Warehouse @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
   createdBy  User      @relation("OrderCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
   approvedBy User?     @relation("OrderApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
 
@@ -947,6 +965,10 @@ model Order {
   invoices       Invoice[]
   returns        Return[]
 
+  // Composite-FK target so order_items.(order_id, company_id) references it and
+  // pins every line to the order's own tenant.
+  @@unique([id, companyId])
+  @@index([companyId])
   @@index([customerId])
   @@index([status])
   @@index([warehouseId, status])
@@ -957,6 +979,10 @@ model Order {
 model OrderItem {
   id                 BigInt   @id @default(autoincrement())
   orderId            BigInt   @map("order_id")
+  // Owning tenant (NOT NULL) — equal to the parent order's company. The two
+  // composite FKs below pin this line's order AND product to this same company,
+  // so order.company = product.company is a DB invariant (Order Draft Foundation).
+  companyId          BigInt   @map("company_id")
   productId          BigInt   @map("product_id")
   productSku         String   @map("product_sku")
   productName        String   @map("product_name")
@@ -970,13 +996,14 @@ model OrderItem {
   lineTotalAmount    BigInt   @map("line_total_amount")
   createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  order          Order                @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  product        Product              @relation(fields: [productId], references: [id], onDelete: Restrict)
+  order          Order                @relation(fields: [orderId, companyId], references: [id, companyId], onDelete: Restrict)
+  product        Product              @relation(fields: [productId, companyId], references: [id, companyId], onDelete: Restrict)
   reservations   StockReservation[]
   priceOverrides OrderPriceOverride[]
   returnItems    ReturnItem[]
 
   @@unique([orderId, productId])
+  @@index([companyId])
   @@index([productId])
   @@map("order_items")
 }

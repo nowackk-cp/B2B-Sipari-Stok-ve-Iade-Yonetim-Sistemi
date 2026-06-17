@@ -180,6 +180,18 @@ async function main() {
     // must RESTRICT so a company that still owns customers cannot be hard-deleted
     // out from under them.
     'customers_company_id_fkey',
+    // Order Draft Foundation: orders are tenant-scoped; the company FK and the two
+    // company-pinned composite FKs (customer, warehouse) must RESTRICT so a
+    // cross-company customer/warehouse can never be referenced and a company that
+    // still owns orders cannot be hard-deleted out from under them.
+    'orders_company_id_fkey',
+    'orders_customer_id_company_id_fkey',
+    'orders_warehouse_id_company_id_fkey',
+    // The order_items order/product FKs are likewise company-pinned composites, so
+    // a line's order AND product belong to the line's tenant (order.company =
+    // product.company is a DB invariant).
+    'order_items_order_id_company_id_fkey',
+    'order_items_product_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
@@ -208,6 +220,10 @@ async function main() {
   // Customer tenancy (Customer Management Foundation): customers carry a NOT NULL
   // company_id so every customer belongs to exactly one tenant.
   requireCol('customers.company_id', { notNull: true });
+  // Order tenancy (Order Draft Foundation): orders and their lines carry a NOT NULL
+  // company_id so every order/line belongs to exactly one tenant.
+  requireCol('orders.company_id', { notNull: true });
+  requireCol('order_items.company_id', { notNull: true });
   requireCol('import_jobs.company_id', { notNull: true });
   requireCol('import_jobs.replay_of_import_id');
   requireCol('import_jobs.attempt_number', { notNull: true });

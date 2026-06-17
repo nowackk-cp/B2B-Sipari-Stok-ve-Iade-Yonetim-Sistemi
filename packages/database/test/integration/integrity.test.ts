@@ -124,11 +124,13 @@ describe('transaction integrity — delete prevention & no cascade', () => {
   });
 
   it('rejects deleting a return (and keeps its items)', async () => {
-    const { order, customer, user } = await makeOrder(prisma);
-    const product = await makeProduct(prisma);
+    const { order, customer, user, company } = await makeOrder(prisma);
+    // The line's product is pinned to the order's tenant by the composite FK.
+    const product = await makeProduct(prisma, { companyId: company.id });
     const orderItem = await prisma.orderItem.create({
       data: {
         orderId: order.id,
+        companyId: company.id,
         productId: product.id,
         productSku: 'SKU',
         productName: 'P',

@@ -85,21 +85,26 @@ export async function makeCompany(prisma: PrismaClient) {
 }
 
 export async function makeOrder(prisma: PrismaClient) {
+  // Orders are company-scoped (company_id NOT NULL, Order Draft Foundation) and the
+  // customer/warehouse are pinned to the order's tenant by composite FKs, so all
+  // three must share ONE company.
+  const company = await makeCompany(prisma);
   const [customer, warehouse, user] = await Promise.all([
-    makeCustomer(prisma),
-    makeWarehouse(prisma),
+    makeCustomer(prisma, { companyId: company.id }),
+    makeWarehouse(prisma, { companyId: company.id }),
     makeUser(prisma),
   ]);
   const s = uniqueSuffix();
   const order = await prisma.order.create({
     data: {
       orderNo: `ORD_${s}`,
+      companyId: company.id,
       customerId: customer.id,
       warehouseId: warehouse.id,
       createdById: user.id,
     },
   });
-  return { order, customer, warehouse, user };
+  return { order, customer, warehouse, user, company };
 }
 
 export async function makeInvoiceSeries(prisma: PrismaClient, fiscalYear = 2026) {
