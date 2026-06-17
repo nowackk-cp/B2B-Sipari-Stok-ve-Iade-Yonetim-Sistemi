@@ -353,6 +353,41 @@ export async function createProduct(
   return product;
 }
 
+let customerSeq = 0;
+
+/** Create a customer directly in `companyId` (customers are company-scoped). Used
+ * to stand up another tenant's customer without going through the API. */
+export async function createCustomer(
+  prisma: PrismaClient,
+  companyId: bigint,
+  over: Partial<{
+    code: string;
+    name: string;
+    type: string;
+    taxNumber: string | null;
+    email: string | null;
+    phone: string | null;
+    deletedAt: Date | null;
+  }> = {},
+): Promise<{ id: bigint; publicId: string; code: string; companyId: bigint }> {
+  customerSeq += 1;
+  const code = over.code ?? `CUST_${Date.now().toString(36)}_${customerSeq}`;
+  const customer = await prisma.customer.create({
+    data: {
+      companyId,
+      code,
+      name: over.name ?? `Customer ${customerSeq}`,
+      type: over.type ?? 'COMPANY',
+      taxNumber: over.taxNumber ?? null,
+      email: over.email ?? null,
+      phone: over.phone ?? null,
+      deletedAt: over.deletedAt ?? null,
+    },
+    select: { id: true, publicId: true, code: true, companyId: true },
+  });
+  return customer;
+}
+
 /** Grant `userId` an explicit warehouse scope (same tenant — composite FKs enforce it). */
 export async function assignWarehouseScope(
   prisma: PrismaClient,

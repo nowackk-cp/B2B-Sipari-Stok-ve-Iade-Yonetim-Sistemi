@@ -65,9 +65,18 @@ export async function makeProduct(
   });
 }
 
-export async function makeCustomer(prisma: PrismaClient) {
+export async function makeCustomer(
+  prisma: PrismaClient,
+  over: Partial<{ code: string; companyId: bigint }> = {},
+) {
   const s = uniqueSuffix();
-  return prisma.customer.create({ data: { code: `CUST_${s}`, name: `Customer ${s}` } });
+  // Customers are company-scoped (company_id NOT NULL, Customer Management
+  // Foundation). Attach a fresh tenant unless the caller pins one, so factory
+  // customers never collide on the company-scoped code unique.
+  const companyId = over.companyId ?? (await makeCompany(prisma)).id;
+  return prisma.customer.create({
+    data: { companyId, code: over.code ?? `CUST_${s}`, name: `Customer ${s}` },
+  });
 }
 
 export async function makeCompany(prisma: PrismaClient) {

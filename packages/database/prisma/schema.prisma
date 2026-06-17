@@ -225,6 +225,10 @@ model Company {
   // may exist in different companies; within one company it is unique among
   // active rows (partial unique `(company_id, sku) WHERE deleted_at IS NULL`).
   products      Product[]
+  // Customers (Customer Management Foundation): customer cards are company-scoped
+  // master data, same tenant model as products/warehouses. The same code may
+  // exist across companies; within one company it is unique among active rows.
+  customers     Customer[]
   // Authorization cache version (PG-004): the per-company monotonic counter that
   // anchors the effective-permission cache key. Maintained entirely by DB
   // triggers (migration 20260616030000_authorization_cache_version).
@@ -852,6 +856,11 @@ model StockTransferRecord {
 model Customer {
   id        BigInt    @id @default(autoincrement())
   publicId  String    @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  // Owning tenant (NOT NULL). Customers are company-scoped master data; the code
+  // uniqueness, every list/get and all mutations are filtered by this company,
+  // resolved from the PostgreSQL principal — never a JWT claim (Customer
+  // Management Foundation). Mirrors the products/warehouses tenant model.
+  companyId BigInt    @map("company_id")
   code      String
   name      String
   taxNumber String?   @map("tax_number")
@@ -862,13 +871,20 @@ model Customer {
   updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
 
+  company   Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
   addresses CustomerAddress[]
   orders    Order[]
   returns   Return[]
   invoices  Invoice[]
   quotes    Quote[]
 
-  @@unique([code])
+  // Customer code identity is (company, code): the same code may exist across
+  // companies. The Customer Management Foundation migration converts this to a
+  // PARTIAL unique (`WHERE deleted_at IS NULL`), preserving the index name, so
+  // within one company an active code is unique while a soft-deleted customer
+  // frees its code for reuse (matches the products SKU convention).
+  @@unique([companyId, code], map: "customers_code_key")
+  @@index([companyId])
   @@index([taxNumber])
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("customers")

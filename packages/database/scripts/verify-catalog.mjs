@@ -96,7 +96,7 @@ async function main() {
   };
   requirePartial('customer_addresses_default_per_type_key', ['is_default', 'deleted_at']);
   requirePartial('import_jobs_active_checksum_key', ['status', 'UPLOADED', 'IMPORTING']);
-  for (const name of ['users_email_key', 'customers_code_key', 'categories_slug_key']) {
+  for (const name of ['users_email_key', 'categories_slug_key']) {
     requirePartial(name, ['deleted_at']);
   }
   // TASK-011: the product SKU unique is COMPANY-SCOPED + soft-delete partial, so a
@@ -106,6 +106,10 @@ async function main() {
   // partial, so a code is unique only among a company's active warehouses and
   // reusable after soft delete.
   requirePartial('warehouses_code_key', ['deleted_at', 'company_id']);
+  // Customer Management Foundation: the customer code unique is likewise
+  // COMPANY-SCOPED + soft-delete partial, so a code is unique only among a
+  // company's active customers and reusable after soft delete.
+  requirePartial('customers_code_key', ['deleted_at', 'company_id']);
 
   // 4. CHECK constraints.
   const checks = await prisma.$queryRawUnsafe(`
@@ -172,6 +176,10 @@ async function main() {
     // TASK-011: products are tenant-scoped; the company FK must RESTRICT so a
     // company that still owns products cannot be hard-deleted out from under them.
     'products_company_id_fkey',
+    // Customer Management Foundation: customers are tenant-scoped; the company FK
+    // must RESTRICT so a company that still owns customers cannot be hard-deleted
+    // out from under them.
+    'customers_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
@@ -197,6 +205,9 @@ async function main() {
   requireCol('user_warehouse_scopes.company_id', { notNull: true });
   // Catalog tenancy (TASK-011): products carry a NOT NULL company_id.
   requireCol('products.company_id', { notNull: true });
+  // Customer tenancy (Customer Management Foundation): customers carry a NOT NULL
+  // company_id so every customer belongs to exactly one tenant.
+  requireCol('customers.company_id', { notNull: true });
   requireCol('import_jobs.company_id', { notNull: true });
   requireCol('import_jobs.replay_of_import_id');
   requireCol('import_jobs.attempt_number', { notNull: true });

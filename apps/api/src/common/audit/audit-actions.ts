@@ -33,6 +33,12 @@ export const AUDIT_ACTIONS = {
   // its business audit row inside the SAME transaction as the two balance changes
   // and the two append-only ledger movements (ADR-007, task rule 21).
   STOCK_TRANSFERRED: 'STOCK_TRANSFERRED',
+  // Customers (Customer Management Foundation): customer master-data mutations.
+  // Each writes a business audit row inside the SAME transaction as the change
+  // (ADR-007).
+  CUSTOMER_CREATED: 'CUSTOMER_CREATED',
+  CUSTOMER_UPDATED: 'CUSTOMER_UPDATED',
+  CUSTOMER_DELETED: 'CUSTOMER_DELETED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

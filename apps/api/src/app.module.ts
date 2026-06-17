@@ -18,6 +18,7 @@ import { PermissionGuard } from './modules/authorization/guards/permission.guard
 import { ProductsModule } from './modules/products/products.module';
 import { WarehousesModule } from './modules/warehouses/warehouses.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { CustomersModule } from './modules/customers/customers.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { InventoryModule } from './modules/inventory/inventory.module';
     ProductsModule,
     WarehousesModule,
     InventoryModule,
+    CustomersModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
