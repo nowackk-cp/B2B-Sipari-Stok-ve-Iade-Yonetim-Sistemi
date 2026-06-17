@@ -6,6 +6,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '@b2b/database';
 import type { OrderListView, OrderView } from '@b2b/contracts';
@@ -293,6 +294,16 @@ export class OrdersService {
       // (2) Expected-status conditional transition DRAFT→APPROVED.
       const count = await this.repo.approveIfDraft(tx, existing.id, actor.userId, at);
       if (count === 0) throw new ConflictException('Order is no longer DRAFT');
+      // (2b) Revalidate every line's PRODUCT under a row lock BEFORE any balance is
+      // locked or reservation written (ORDER_RULES "Aktif ürün doğrulaması" / ORD-10,
+      // T-08): a product made inactive or soft-deleted while the order was DRAFT must
+      // fail approval with NO reservation. The FOR UPDATE makes the deactivate/delete-
+      // vs-approve race safe; a stale line throws 422 → the whole transaction rolls
+      // back (order stays DRAFT, no reservation/history/audit). The lifecycle re-check
+      // belongs here even though create/update already validated, because the product
+      // can change between draft and approve. The product's company MUST equal the
+      // order's (== actor.companyId) — a DB composite-FK invariant, re-asserted here.
+      await this.assertOrderProductsStillActive(tx, existing.id, actor.companyId);
       // (3) Read the lines and reserve stock (locks each balance FOR UPDATE, checks
       // available ≥ qty for ALL lines, then reserved += qty + ACTIVE reservation
       // rows). Insufficient stock on any line throws 409 → full rollback.
@@ -500,6 +511,31 @@ export class OrdersService {
     if (!access) throw new NotFoundException('Order not found');
     if (!(access.global || access.scopedWarehouseIds.has(warehouseId))) {
       throw new NotFoundException('Order not found');
+    }
+  }
+
+  /**
+   * Re-validate at APPROVE time that EVERY order line's product is still orderable:
+   * an ACTIVE (`is_active = true`), non-soft-deleted (`deleted_at IS NULL`) row in
+   * the order's own company (ORDER_RULES "Aktif ürün doğrulaması" / ORD-10, T-08).
+   * Runs inside the approve transaction, locking the product rows FOR UPDATE (see
+   * {@link OrderRepository.lockOrderItemProductsForApproval}) so a concurrent
+   * deactivate/soft-delete is serialised. A stale (inactive/deleted/cross-company)
+   * product throws 422 BUSINESS_RULE, rolling the whole transaction back so the
+   * order stays DRAFT with no reservation — distinct from the 409 used for order
+   * status conflicts and stock shortfalls. */
+  private async assertOrderProductsStillActive(
+    tx: Prisma.TransactionClient,
+    orderId: bigint,
+    companyId: bigint,
+  ): Promise<void> {
+    const products = await this.repo.lockOrderItemProductsForApproval(tx, orderId);
+    for (const product of products) {
+      if (product.companyId !== companyId || !product.isActive || product.deletedAt !== null) {
+        throw new UnprocessableEntityException(
+          'An order line product is no longer active and cannot be approved',
+        );
+      }
     }
   }
 

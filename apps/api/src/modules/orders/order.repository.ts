@@ -371,6 +371,44 @@ export class OrderRepository {
     return result.count;
   }
 
+  /**
+   * Lock and re-read the product rows backing an order's lines FOR SHARE so the
+   * caller can revalidate product lifecycle at APPROVE time (ORDER_RULES §"Aktif
+   * ürün doğrulaması" / ORD-10, T-08): a product made inactive or soft-deleted while
+   * the order was DRAFT must block approval with no reservation. The lifecycle is
+   * re-checked under a row lock INSIDE the approve transaction, BEFORE any balance
+   * is locked or reservation written, so the lock serialises against a concurrent
+   * deactivate/soft-delete — if that commits first the row is read inactive/deleted
+   * here and approve fails; if approve locks first, the deactivate waits until commit
+   * and the reservation is for a still-active product.
+   *
+   * FOR SHARE (not FOR UPDATE) is deliberate. A deactivate/soft-delete is an UPDATE
+   * of a non-key column, taking FOR NO KEY UPDATE on the product row, which FOR SHARE
+   * DOES conflict with — so the lifecycle race is still fully serialised. But a
+   * concurrent stock adjust/transfer/reserve holds the (product, warehouse) balance
+   * row and, on writing it, needs FOR KEY SHARE on the referenced product row (the
+   * FK parent). FOR KEY SHARE conflicts ONLY with FOR UPDATE, so a FOR UPDATE here
+   * would DEADLOCK that stock op (approve holds product, wants balance; the stock op
+   * holds balance, wants product key-share). FOR SHARE is compatible with FOR KEY
+   * SHARE, so concurrent stock work serialises on the balance lock alone — no
+   * deadlock — while the deactivate/delete race stays correct. Rows are ordered by
+   * product id ascending (the same total order used for balance locks). MUST run
+   * inside the caller's transaction (locks held to commit). */
+  async lockOrderItemProductsForApproval(
+    tx: Prisma.TransactionClient,
+    orderId: bigint,
+  ): Promise<Array<{ id: bigint; companyId: bigint; isActive: boolean; deletedAt: Date | null }>> {
+    return tx.$queryRaw<
+      Array<{ id: bigint; companyId: bigint; isActive: boolean; deletedAt: Date | null }>
+    >`
+      SELECT p."id", p."company_id" AS "companyId", p."is_active" AS "isActive",
+             p."deleted_at" AS "deletedAt"
+      FROM "products" p
+      WHERE p."id" IN (SELECT "product_id" FROM "order_items" WHERE "order_id" = ${orderId})
+      ORDER BY p."id" ASC
+      FOR SHARE`;
+  }
+
   /** Read an order's lines as reservation inputs (internal order-item + product
    * ids and the quantity), ordered by product id ascending so the caller can lock
    * the (product, warehouse) balances in a deterministic order (ADR-003 §6).

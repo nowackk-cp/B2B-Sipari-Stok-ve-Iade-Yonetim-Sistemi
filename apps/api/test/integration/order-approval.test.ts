@@ -606,4 +606,142 @@ describe('Order approval + stock reservation foundation (integration, real Postg
     expect(await ctx.prisma.stockReservation.count()).toBe(0);
     expect((await balanceOf(ctx, f.product.id, f.warehouse.id))?.reserved).toBe(0n);
   });
+
+  // --- product lifecycle revalidation at approve (ORDER_RULES / ORD-10, T-08) ---
+  // A product made inactive or soft-deleted while the order is still DRAFT must
+  // make approve fail with 422 and NO reservation. The reservation balance is left
+  // generous so the ONLY reason approve can fail in these cases is the product.
+
+  it('25. product deactivated after the draft → approve 422, nothing reserved', async () => {
+    const f = await fixture(ctx);
+    await seedBalance(ctx, f.product.id, f.warehouse.id, 100n);
+    const id = await draftOrder(ctx, f, '2');
+    await ctx.prisma.product.update({ where: { id: f.product.id }, data: { isActive: false } });
+
+    const res = await approve(ctx, f.actor.token, id).expect(422);
+    expect(res.body.code).toBe('BUSINESS_RULE');
+    expect(res.body.requestId).toBeTruthy();
+
+    // Order stays DRAFT; balance/reservation/history/audit all unchanged.
+    const order = await ctx.prisma.order.findUniqueOrThrow({
+      where: { publicId: id },
+      select: { id: true, status: true, approvedAt: true },
+    });
+    expect(order.status).toBe('DRAFT');
+    expect(order.approvedAt).toBeNull();
+    expect(await balanceOf(ctx, f.product.id, f.warehouse.id)).toEqual({
+      onHand: 100n,
+      reserved: 0n,
+    });
+    expect(await ctx.prisma.stockReservation.count({ where: { orderId: order.id } })).toBe(0);
+    expect(
+      await ctx.prisma.orderStatusHistory.count({
+        where: { orderId: order.id, toStatus: 'APPROVED' },
+      }),
+    ).toBe(0);
+    expect(
+      await ctx.prisma.auditLog.count({ where: { action: 'ORDER_APPROVED', entityId: order.id } }),
+    ).toBe(0);
+  });
+
+  it('26. product soft-deleted after the draft → approve 422, nothing reserved', async () => {
+    const f = await fixture(ctx);
+    await seedBalance(ctx, f.product.id, f.warehouse.id, 100n);
+    const id = await draftOrder(ctx, f, '2');
+    await ctx.prisma.product.update({
+      where: { id: f.product.id },
+      data: { deletedAt: new Date() },
+    });
+
+    const res = await approve(ctx, f.actor.token, id).expect(422);
+    expect(res.body.code).toBe('BUSINESS_RULE');
+
+    const order = await ctx.prisma.order.findUniqueOrThrow({
+      where: { publicId: id },
+      select: { id: true, status: true },
+    });
+    expect(order.status).toBe('DRAFT');
+    expect((await balanceOf(ctx, f.product.id, f.warehouse.id))?.reserved).toBe(0n);
+    expect(await ctx.prisma.stockReservation.count({ where: { orderId: order.id } })).toBe(0);
+    expect(
+      await ctx.prisma.orderStatusHistory.count({
+        where: { orderId: order.id, toStatus: 'APPROVED' },
+      }),
+    ).toBe(0);
+    expect(
+      await ctx.prisma.auditLog.count({ where: { action: 'ORDER_APPROVED', entityId: order.id } }),
+    ).toBe(0);
+  });
+
+  it('27. multi-item order: ONE product inactive ⇒ NO line is reserved (all-or-nothing)', async () => {
+    const f = await fixture(ctx);
+    const p2 = await createPricedProduct(ctx, f.companyId, { listPriceAmount: 5000n });
+    await seedBalance(ctx, f.product.id, f.warehouse.id, 100n);
+    await seedBalance(ctx, p2.id, f.warehouse.id, 100n);
+    const created = await createOrder(ctx, f.actor.token, {
+      customerId: f.customer.publicId,
+      warehouseId: f.warehouse.publicId,
+      items: [
+        { productId: f.product.publicId, quantity: '2' },
+        { productId: p2.publicId, quantity: '3' },
+      ],
+    }).expect(201);
+    // Deactivate the SECOND line's product after the draft.
+    await ctx.prisma.product.update({ where: { id: p2.id }, data: { isActive: false } });
+
+    await approve(ctx, f.actor.token, created.body.id).expect(422);
+    // Neither line moved; order still DRAFT; no reservation rows at all.
+    expect((await balanceOf(ctx, f.product.id, f.warehouse.id))?.reserved).toBe(0n);
+    expect((await balanceOf(ctx, p2.id, f.warehouse.id))?.reserved).toBe(0n);
+    const order = await ctx.prisma.order.findUniqueOrThrow({
+      where: { publicId: created.body.id },
+      select: { id: true, status: true },
+    });
+    expect(order.status).toBe('DRAFT');
+    expect(await ctx.prisma.stockReservation.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  it('28. concurrent product deactivate vs approve: no inactive product is ever reserved', async () => {
+    // Run the race several times. Whichever side wins the product row lock, exactly
+    // one of two serialised outcomes must hold (never a half state): approve wins and
+    // reserves a then-active product, or the deactivate wins and approve fails 422
+    // with nothing reserved.
+    for (let i = 0; i < 6; i += 1) {
+      const f = await fixture(ctx);
+      await seedBalance(ctx, f.product.id, f.warehouse.id, 100n);
+      const id = await draftOrder(ctx, f, '2');
+
+      const [approveRes] = await Promise.all([
+        approve(ctx, f.actor.token, id),
+        ctx.prisma.product.update({ where: { id: f.product.id }, data: { isActive: false } }),
+      ]);
+
+      const order = await ctx.prisma.order.findUniqueOrThrow({
+        where: { publicId: id },
+        select: { id: true, status: true },
+      });
+      const reservations = await ctx.prisma.stockReservation.count({
+        where: { orderId: order.id, status: 'ACTIVE' },
+      });
+      const reserved = (await balanceOf(ctx, f.product.id, f.warehouse.id))?.reserved ?? 0n;
+
+      // Exactly one of two serialised outcomes — never a half state. (The deactivate
+      // always commits eventually, so the product ends inactive either way; what
+      // matters is whether approve created its reservation BEFORE that, under lock.)
+      if (approveRes.status === 200) {
+        // Approve won the product lock: it committed while the product was still
+        // active, so its reservation is valid and the order is APPROVED.
+        expect(order.status).toBe('APPROVED');
+        expect(reservations).toBe(1);
+        expect(reserved).toBe(2n);
+      } else {
+        // Deactivate won: approve must fail (422) with the order left DRAFT and
+        // absolutely no reservation for the now-inactive product.
+        expect(approveRes.status).toBe(422);
+        expect(order.status).toBe('DRAFT');
+        expect(reservations).toBe(0);
+        expect(reserved).toBe(0n);
+      }
+    }
+  }, 60000);
 });
