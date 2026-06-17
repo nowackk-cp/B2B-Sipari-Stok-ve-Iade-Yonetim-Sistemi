@@ -37,6 +37,9 @@ async function main() {
     'no_mutation_audit_logs',
     'no_mutation_payments',
     'no_mutation_import_job_errors',
+    // Stock Transfer Foundation: a committed atomic transfer record is write-once
+    // (UPDATE/DELETE blocked at the DB level — task rule 15).
+    'no_mutation_stock_transfer_records',
   ]) {
     if (!triggerNames.has(name)) fail(`missing append-only trigger: ${name}`);
   }
@@ -116,6 +119,9 @@ async function main() {
     'stock_balances_reserved_le_on_hand',
     'stock_balances_on_hand_nonneg',
     'invoice_series_next_number_pos',
+    // Stock Transfer Foundation: distinct source/destination + positive quantity.
+    'stock_transfer_records_src_ne_dest',
+    'stock_transfer_records_qty_pos',
   ]) {
     if (!checkNames.has(name)) fail(`missing CHECK constraint: ${name}`);
   }

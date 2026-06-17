@@ -309,6 +309,7 @@ model User {
   priceOverridesApprover OrderPriceOverride[]    @relation("OrderPriceOverrideApprovedBy")
   ledgerEntries          StockLedger[]           @relation("StockLedgerCreatedBy")
   transfersCreated       StockTransfer[]         @relation("StockTransferCreatedBy")
+  transferRecordsCreated StockTransferRecord[]   @relation("StockTransferRecordCreatedBy")
   transferStatusChanges  TransferStatusHistory[] @relation("TransferStatusHistoryChangedBy")
   returnsCreated         Return[]                @relation("ReturnCreatedBy")
   returnStatusChanges    ReturnStatusHistory[]   @relation("ReturnStatusHistoryChangedBy")
@@ -602,6 +603,7 @@ model Product {
   stockLedgerEntries StockLedger[]
   reservations       StockReservation[]
   transferItems      StockTransferItem[]
+  transferRecords    StockTransferRecord[]
   returnItems        ReturnItem[]
   invoiceItems       InvoiceItem[]
   quoteItems         QuoteItem[]
@@ -611,6 +613,10 @@ model Product {
   // (`WHERE deleted_at IS NULL`), preserving the index name, so a soft-deleted
   // product's SKU becomes reusable within the same company.
   @@unique([companyId, sku], map: "products_sku_key")
+  // Composite-FK target so stock_transfer_records.(product_id, company_id)
+  // references it and pins every atomic transfer to the product's own tenant
+  // (Stock Transfer Foundation), mirroring the warehouse (id, company_id) target.
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([categoryId])
   @@index([isActive])
@@ -642,13 +648,15 @@ model Warehouse {
   updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  company            Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  company            Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
   stockBalances      StockBalance[]
   stockLedgerEntries StockLedger[]
   reservations       StockReservation[]
   scopes             UserWarehouseScope[]
-  transfersOut       StockTransfer[]      @relation("TransferSource")
-  transfersIn        StockTransfer[]      @relation("TransferDest")
+  transfersOut       StockTransfer[]       @relation("TransferSource")
+  transfersIn        StockTransfer[]       @relation("TransferDest")
+  transferRecordsOut StockTransferRecord[] @relation("StockTransferRecordSource")
+  transferRecordsIn  StockTransferRecord[] @relation("StockTransferRecordDest")
   orders             Order[]
 
   // Warehouse code identity is (company, code): the same code may exist across
@@ -790,6 +798,51 @@ model TransferStatusHistory {
 
   @@index([transferId])
   @@map("transfer_status_history")
+}
+
+/// Atomic stock-transfer command record (Stock Transfer Foundation).
+///
+/// One IMMUTABLE row per accepted `POST /stock/transfers`: a single product moved
+/// atomically from one warehouse to another WITHIN one company. This is distinct
+/// from the planned multi-step `stock_transfers` workflow (DRAFT→IN_TRANSIT→
+/// RECEIVED, TASK-019); this foundation performs the source-out + destination-in
+/// in ONE transaction and correlates the two append-only `stock_ledger` movements
+/// (TRANSFER_OUT / TRANSFER_IN) via `reference_type = 'STOCK_TRANSFER',
+/// reference_id = this.id`.
+///
+/// Tenant safety is a DB invariant: `company_id` is carried explicitly and the
+/// three composite FKs pin product.company = from.company = to.company = this
+/// company, so a cross-company transfer is physically un-insertable (not merely
+/// rejected in code). The row is append-only — a `prevent_mutation` trigger blocks
+/// UPDATE/DELETE — and idempotent per client: `(company_id, idempotency_key)` is
+/// unique, so a replay finds this row and creates no second transfer/movement.
+/// `source ≠ destination` and `quantity > 0` are DB CHECKs (manual SQL).
+model StockTransferRecord {
+  id              BigInt   @id @default(autoincrement())
+  publicId        String   @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  companyId       BigInt   @map("company_id")
+  productId       BigInt   @map("product_id")
+  fromWarehouseId BigInt   @map("from_warehouse_id")
+  toWarehouseId   BigInt   @map("to_warehouse_id")
+  quantity        BigInt
+  reason          String?
+  idempotencyKey  String   @map("idempotency_key")
+  createdById     BigInt   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Composite FKs pin every endpoint to THIS company. onDelete: Restrict — a
+  // product/warehouse that still owns a transfer record cannot be hard-deleted.
+  product       Product   @relation(fields: [productId, companyId], references: [id, companyId], onDelete: Restrict)
+  fromWarehouse Warehouse @relation("StockTransferRecordSource", fields: [fromWarehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  toWarehouse   Warehouse @relation("StockTransferRecordDest", fields: [toWarehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdBy     User      @relation("StockTransferRecordCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, createdAt])
+  @@index([fromWarehouseId])
+  @@index([toWarehouseId])
+  @@index([productId])
+  @@map("stock_transfer_records")
 }
 
 // ---------------------------------------------------------------------------

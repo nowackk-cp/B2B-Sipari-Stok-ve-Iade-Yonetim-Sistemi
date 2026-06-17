@@ -29,6 +29,10 @@ export const AUDIT_ACTIONS = {
   // business audit row inside the SAME transaction as the balance change + the
   // append-only ledger movement (ADR-007, DATABASE_DESIGN §18 "Stok düzeltme").
   STOCK_ADJUSTED: 'STOCK_ADJUSTED',
+  // Stock Transfer Foundation: an atomic warehouse-to-warehouse transfer writes
+  // its business audit row inside the SAME transaction as the two balance changes
+  // and the two append-only ledger movements (ADR-007, task rule 21).
+  STOCK_TRANSFERRED: 'STOCK_TRANSFERRED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

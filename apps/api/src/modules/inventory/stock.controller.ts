@@ -5,6 +5,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Param,
   Post,
   Query,
   Req,
@@ -22,6 +23,8 @@ import type {
   StockBalanceListView,
   StockMovementListView,
   StockMovementView,
+  StockTransferListView,
+  StockTransferView,
 } from '@b2b/contracts';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthPrincipal } from '../../common/auth/principal';
@@ -29,12 +32,16 @@ import { requestMeta } from '../../common/http/request-meta';
 import { RequirePermissions } from '../authorization/decorators/require-permissions.decorator';
 import { StockService } from './stock.service';
 import { CreateStockAdjustmentDto } from './dto/create-adjustment.dto';
+import { CreateStockTransferDto } from './dto/create-transfer.dto';
 import { ListStockBalancesQuery } from './dto/list-balances.query';
 import { ListStockMovementsQuery } from './dto/list-movements.query';
+import { ListStockTransfersQuery } from './dto/list-transfers.query';
 import {
   StockBalanceListResponse,
   StockMovementListResponse,
   StockMovementResponse,
+  StockTransferListResponse,
+  StockTransferResponse,
 } from './dto/stock-response.dto';
 
 /**
@@ -72,6 +79,49 @@ export class StockController {
     @Req() req: Request,
   ): Promise<StockMovementView> {
     return this.stock.adjust(principal, dto, idempotencyKey, requestMeta(req));
+  }
+
+  @Post('transfers')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('stock:transfer')
+  @ApiOperation({
+    summary: 'Atomically transfer a product between two warehouses (same company).',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Client-generated key; a replay returns the same transfer (no duplicate).',
+  })
+  @ApiCreatedResponse({ type: StockTransferResponse, description: 'The recorded stock transfer.' })
+  transfer(
+    @CurrentUser() principal: AuthPrincipal,
+    @Body() dto: CreateStockTransferDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() req: Request,
+  ): Promise<StockTransferView> {
+    return this.stock.transfer(principal, dto, idempotencyKey, requestMeta(req));
+  }
+
+  @Get('transfers')
+  @RequirePermissions('stock:read')
+  @ApiOperation({ summary: 'List the stock transfers the caller may see (paginated).' })
+  @ApiOkResponse({ type: StockTransferListResponse, description: 'A page of stock transfers.' })
+  listTransfers(
+    @CurrentUser() principal: AuthPrincipal,
+    @Query() query: ListStockTransfersQuery,
+  ): Promise<StockTransferListView> {
+    return this.stock.listTransfers(principal, query);
+  }
+
+  @Get('transfers/:id')
+  @RequirePermissions('stock:read')
+  @ApiOperation({ summary: 'Get one stock transfer by public id (requires source or dest scope).' })
+  @ApiOkResponse({ type: StockTransferResponse, description: 'The stock transfer.' })
+  getTransfer(
+    @CurrentUser() principal: AuthPrincipal,
+    @Param('id') id: string,
+  ): Promise<StockTransferView> {
+    return this.stock.getTransfer(principal, id);
   }
 
   @Get('balances')

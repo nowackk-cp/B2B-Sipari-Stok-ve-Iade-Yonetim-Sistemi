@@ -10,6 +10,8 @@ import type {
   StockBalanceListView,
   StockMovementListView,
   StockMovementView,
+  StockTransferListView,
+  StockTransferView,
 } from '@b2b/contracts';
 import { AuditWriter } from '../../common/audit/audit-writer.service';
 import { AUDIT_ACTIONS } from '../../common/audit/audit-actions';
@@ -23,15 +25,20 @@ import {
   type MovementRow,
   type ResolvedProduct,
   type ResolvedWarehouse,
+  type TransferRow,
 } from './stock.repository';
 import { toBalanceView, toMovementView } from './stock-view';
+import { toTransferView } from './transfer-view';
 import type { CreateStockAdjustmentDto } from './dto/create-adjustment.dto';
+import type { CreateStockTransferDto } from './dto/create-transfer.dto';
 import type { ListStockBalancesQuery } from './dto/list-balances.query';
 import type { ListStockMovementsQuery } from './dto/list-movements.query';
+import type { ListStockTransfersQuery } from './dto/list-transfers.query';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const STOCK_ADJUST = 'stock:adjust';
+const STOCK_TRANSFER = 'stock:transfer';
 
 /**
  * Inventory application service (Stock Ledger Foundation).
@@ -97,7 +104,7 @@ export class StockService {
 
     // Warehouse scope: holding stock:adjust is not enough — the actor must be
     // scoped to THIS warehouse (explicit grant or warehouse:scope:all).
-    await this.assertWarehouseScope(actor, warehouse.id);
+    await this.assertWarehouseScope(actor, warehouse.id, STOCK_ADJUST);
 
     // Idempotency: the ledger key is deterministic per (company, client key). A
     // replay returns the SAME movement and creates no duplicate; the same key
@@ -159,6 +166,182 @@ export class StockService {
     }
   }
 
+  /**
+   * Atomically transfer one product from a source warehouse to a destination
+   * warehouse WITHIN the actor's company (Stock Transfer Foundation).
+   *
+   * In ONE transaction: insert the immutable transfer record, lock BOTH balance
+   * rows in a deterministic order (by warehouse id — same product, so this avoids
+   * AB/BA deadlocks under opposite-direction concurrency), reject a negative
+   * source result (409), decrement source / increment destination, append the two
+   * correlated append-only ledger movements (TRANSFER_OUT + TRANSFER_IN, sharing
+   * `reference_id = transfer.id`), and write the business audit — all atomic.
+   *
+   * The same three PostgreSQL-resolved controls as `adjust` apply, extended to
+   * BOTH warehouses: permission (`stock:transfer`), tenant (product + both
+   * warehouses resolved inside `actor.companyId`; cross-tenant → 404), and
+   * warehouse SCOPE (the actor must be scoped to BOTH the source AND the
+   * destination). `Idempotency-Key` makes a client retry a no-op replay.
+   */
+  async transfer(
+    actor: AuthPrincipal,
+    dto: CreateStockTransferDto,
+    idempotencyKey: string | undefined,
+    meta: RequestMeta,
+  ): Promise<StockTransferView> {
+    const key = idempotencyKey?.trim();
+    if (!key) {
+      throw new BadRequestException('Idempotency-Key header is required for stock transfers');
+    }
+    if (!isBigIntStringInRange(dto.quantity)) {
+      throw new BadRequestException('quantity must be a positive integer string');
+    }
+    const quantity = BigInt(dto.quantity);
+    if (quantity <= 0n) {
+      throw new BadRequestException('quantity must be greater than zero');
+    }
+    // Source and destination must differ (also a DB CHECK — last-line safety).
+    if (dto.fromWarehouseId === dto.toWarehouseId) {
+      throw new BadRequestException('source and destination warehouse must differ');
+    }
+
+    // Tenant + lifecycle: product and BOTH warehouses must be ACTIVE rows in the
+    // actor's own company (resolving inside one company also enforces "all three
+    // share a company" — rules 8/9/10/11).
+    const from = await this.repo.findActiveWarehouse(actor.companyId, dto.fromWarehouseId);
+    if (!from) throw new NotFoundException('Source warehouse not found');
+    const to = await this.repo.findActiveWarehouse(actor.companyId, dto.toWarehouseId);
+    if (!to) throw new NotFoundException('Destination warehouse not found');
+    const product = await this.repo.findActiveProduct(actor.companyId, dto.productId);
+    if (!product) throw new NotFoundException('Product not found');
+
+    // Warehouse scope: holding stock:transfer is not enough — the actor must be
+    // scoped to BOTH the source AND the destination (rule 12). `scope:all` is only
+    // honoured within the same company (rule 13), enforced by WarehouseScopeService.
+    await this.assertWarehouseScope(actor, from.id, STOCK_TRANSFER);
+    await this.assertWarehouseScope(actor, to.id, STOCK_TRANSFER);
+
+    // Idempotency: a replay returns the SAME transfer and creates no duplicate; the
+    // same key with a DIFFERENT payload is a conflict (409).
+    const existing = await this.repo.findTransferByKey(actor.companyId, key);
+    if (existing) {
+      return this.replayOrConflictTransfer(
+        existing,
+        from.id,
+        to.id,
+        product.id,
+        quantity,
+        dto.reason,
+      );
+    }
+
+    try {
+      const record = await this.prisma.transaction(async (tx) => {
+        // The transfer record is inserted first: the (company, key) unique is the
+        // concurrency guard for same-key requests (the loser hits P2002 below and
+        // rolls back its whole transaction, leaving balances untouched).
+        const rec = await this.repo.insertTransferRecord(tx, {
+          companyId: actor.companyId,
+          productId: product.id,
+          fromWarehouseId: from.id,
+          toWarehouseId: to.id,
+          quantity,
+          reason: dto.reason,
+          idempotencyKey: key,
+          createdById: actor.userId,
+        });
+
+        // Lock BOTH balance rows in a deterministic order (lowest warehouse id
+        // first). Same product, so ordering by warehouse id is total and identical
+        // for A→B and B→A — concurrent opposite transfers can never deadlock.
+        const [firstWh, secondWh] = from.id < to.id ? [from.id, to.id] : [to.id, from.id];
+        const firstBefore = await this.repo.lockBalanceOnHand(tx, product.id, firstWh);
+        const secondBefore = await this.repo.lockBalanceOnHand(tx, product.id, secondWh);
+        const beforeByWh = new Map<bigint, bigint>([
+          [firstWh, firstBefore],
+          [secondWh, secondBefore],
+        ]);
+        const fromBefore = beforeByWh.get(from.id)!;
+        const toBefore = beforeByWh.get(to.id)!;
+
+        // Negative check UNDER the lock (rule: source balance can never go < 0).
+        const fromAfter = fromBefore - quantity;
+        if (fromAfter < 0n) {
+          throw new ConflictException('Insufficient stock in the source warehouse');
+        }
+        const toAfter = toBefore + quantity;
+
+        await this.repo.setBalanceOnHand(tx, product.id, from.id, fromAfter);
+        await this.repo.setBalanceOnHand(tx, product.id, to.id, toAfter);
+
+        // Two correlated append-only movements, bound by reference_id = rec.id.
+        await this.repo.insertTransferMovement(tx, {
+          productId: product.id,
+          warehouseId: from.id,
+          changeType: 'TRANSFER_OUT',
+          quantitySigned: -quantity,
+          balanceAfter: fromAfter,
+          transferId: rec.id,
+          idempotencyKey: `TRANSFER_OUT:${rec.id.toString()}`,
+          reason: dto.reason,
+          createdById: actor.userId,
+        });
+        await this.repo.insertTransferMovement(tx, {
+          productId: product.id,
+          warehouseId: to.id,
+          changeType: 'TRANSFER_IN',
+          quantitySigned: quantity,
+          balanceAfter: toAfter,
+          transferId: rec.id,
+          idempotencyKey: `TRANSFER_IN:${rec.id.toString()}`,
+          reason: dto.reason,
+          createdById: actor.userId,
+        });
+
+        await this.audit.write(tx, {
+          action: AUDIT_ACTIONS.STOCK_TRANSFERRED,
+          actor: this.actorSnapshot(actor),
+          entityType: 'stock_transfer',
+          entityId: rec.id,
+          before: {
+            from: { onHand: fromBefore.toString() },
+            to: { onHand: toBefore.toString() },
+          },
+          after: this.transferAuditProjection(
+            product,
+            from,
+            to,
+            quantity,
+            fromAfter,
+            toAfter,
+            dto.reason,
+          ),
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+        });
+        return rec;
+      });
+      return toTransferView(record);
+    } catch (err) {
+      // A concurrent request with the SAME key won the (company, key) race: the
+      // whole transaction rolled back with no side effects. Re-read and replay.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const row = await this.repo.findTransferByKey(actor.companyId, key);
+        if (row) {
+          return this.replayOrConflictTransfer(
+            row,
+            from.id,
+            to.id,
+            product.id,
+            quantity,
+            dto.reason,
+          );
+        }
+      }
+      throw err;
+    }
+  }
+
   // --- reads ----------------------------------------------------------------
 
   async listBalances(
@@ -199,6 +382,54 @@ export class StockService {
       productId: scoped.productId,
     });
     return paginate(rows, limit, toMovementView, (last) => encodeCursor(last.id, 'sm'));
+  }
+
+  /**
+   * List the transfers the caller may see (paginated). Scope-filtered: a global
+   * actor sees every same-company transfer; an explicitly-scoped actor sees only
+   * transfers whose SOURCE or DESTINATION is one of their scoped warehouses; an
+   * actor with no scope sees nothing (deny-by-default). Optional warehouse/product
+   * filters are intersected with that scope and can never widen it.
+   */
+  async listTransfers(
+    actor: AuthPrincipal,
+    query: ListStockTransfersQuery,
+  ): Promise<StockTransferListView> {
+    const limit = clampLimit(query.limit);
+    const cursorId = decodeCursor(query.cursor, 'st');
+
+    const scoped = await this.resolveScope(actor, query.warehouseId, query.productId);
+    if (!scoped) return emptyPage();
+
+    const rows = await this.repo.listTransfers(actor.companyId, {
+      cursorId,
+      take: limit + 1,
+      onlyIds: scoped.onlyIds,
+      warehouseId: scoped.warehouseId,
+      productId: scoped.productId,
+    });
+    return paginate(rows, limit, toTransferView, (last) => encodeCursor(last.id, 'st'));
+  }
+
+  /**
+   * Get one transfer by public id. The caller must hold `stock:read` (route guard)
+   * and be scoped to the transfer's SOURCE or DESTINATION warehouse. A transfer in
+   * another tenant, or one the actor has no scope to, is hidden as a 404 (entity
+   * hiding — API_CONVENTIONS §7b), never an information-leaking 403.
+   */
+  async getTransfer(actor: AuthPrincipal, publicId: string): Promise<StockTransferView> {
+    const row = await this.repo.findTransferByPublicId(actor.companyId, publicId);
+    if (!row) throw new NotFoundException('Transfer not found');
+
+    const access = await this.scope.resolveWarehouseAccess(actor.userId);
+    if (!access) throw new NotFoundException('Transfer not found');
+    const inScope =
+      access.global ||
+      access.scopedWarehouseIds.has(row.fromWarehouseId) ||
+      access.scopedWarehouseIds.has(row.toWarehouseId);
+    if (!inScope) throw new NotFoundException('Transfer not found');
+
+    return toTransferView(row);
   }
 
   // --- internals ------------------------------------------------------------
@@ -244,14 +475,18 @@ export class StockService {
   /**
    * The warehouse is already known to be an active row in the actor's own tenant.
    * Re-resolve the scope decision fresh from PostgreSQL: the actor must hold the
-   * route permission AND be scoped to this warehouse. A same-tenant out-of-scope
+   * given permission AND be scoped to this warehouse. A same-tenant out-of-scope
    * actor is a 403 — never a silent allow.
    */
-  private async assertWarehouseScope(actor: AuthPrincipal, warehouseId: bigint): Promise<void> {
+  private async assertWarehouseScope(
+    actor: AuthPrincipal,
+    warehouseId: bigint,
+    permission: string,
+  ): Promise<void> {
     const decision = await this.scope.canAccessWarehouseForPermission(
       actor.userId,
       warehouseId,
-      STOCK_ADJUST,
+      permission,
     );
     if (!decision.allowed) throw new ForbiddenException('Out of warehouse scope');
   }
@@ -275,6 +510,29 @@ export class StockService {
       throw new ConflictException('Idempotency-Key was reused with a different payload');
     }
     return toMovementView(existing);
+  }
+
+  /** Decide whether a found transfer is an idempotent replay (same payload) or a
+   * key reuse with a different payload (409). The record carries the full transfer
+   * payload (product, source, destination, quantity, reason). */
+  private replayOrConflictTransfer(
+    existing: TransferRow,
+    fromWarehouseId: bigint,
+    toWarehouseId: bigint,
+    productId: bigint,
+    quantity: bigint,
+    reason: string,
+  ): StockTransferView {
+    const samePayload =
+      existing.fromWarehouseId === fromWarehouseId &&
+      existing.toWarehouseId === toWarehouseId &&
+      existing.productId === productId &&
+      existing.quantity === quantity &&
+      (existing.reason ?? '') === reason;
+    if (!samePayload) {
+      throw new ConflictException('Idempotency-Key was reused with a different payload');
+    }
+    return toTransferView(existing);
   }
 
   private actorSnapshot(actor: AuthPrincipal) {
@@ -301,6 +559,28 @@ export class StockService {
       direction,
       quantity: magnitude.toString(),
       balanceAfter: balanceAfter.toString(),
+      reason,
+    };
+  }
+
+  /** Whitelisted domain projection for the transfer audit `after` (public ids, no
+   * secrets): both endpoints, the quantity and the resulting balances. */
+  private transferAuditProjection(
+    product: ResolvedProduct,
+    from: ResolvedWarehouse,
+    to: ResolvedWarehouse,
+    quantity: bigint,
+    fromBalanceAfter: bigint,
+    toBalanceAfter: bigint,
+    reason: string,
+  ): Record<string, unknown> {
+    return {
+      productId: product.publicId,
+      fromWarehouseId: from.publicId,
+      toWarehouseId: to.publicId,
+      quantity: quantity.toString(),
+      fromBalanceAfter: fromBalanceAfter.toString(),
+      toBalanceAfter: toBalanceAfter.toString(),
       reason,
     };
   }

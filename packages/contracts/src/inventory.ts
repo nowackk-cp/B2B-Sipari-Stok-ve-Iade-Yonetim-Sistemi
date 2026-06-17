@@ -63,3 +63,34 @@ export interface StockMovementView {
 
 /** A page of stock movements. */
 export type StockMovementListView = Paginated<StockMovementView>;
+
+/**
+ * A single atomic stock transfer (Stock Transfer Foundation). One immutable
+ * record per `POST /stock/transfers`: a product moved from `fromWarehouseId` to
+ * `toWarehouseId` within one company. The two correlated ledger movements
+ * (TRANSFER_OUT / TRANSFER_IN) are not part of this view; this is the command
+ * record itself. Identity and warehouse/product references are public UUIDs;
+ * quantity is a positive BIGINT string.
+ */
+export interface StockTransferView {
+  /** Public UUID of the transfer record. */
+  id: string;
+  /** Public UUID of the source warehouse (on-hand decreased). */
+  fromWarehouseId: string;
+  /** Public UUID of the destination warehouse (on-hand increased). */
+  toWarehouseId: string;
+  /** Public UUID of the product moved. */
+  productId: string;
+  /** Product SKU snapshot (for display). */
+  sku: string;
+  /** Product name snapshot (for display). */
+  name: string;
+  /** Quantity moved, as a positive BIGINT string. */
+  quantity: string;
+  /** Free-text reason for the transfer. */
+  reason: string | null;
+  createdAt: string;
+}
+
+/** A page of stock transfers. */
+export type StockTransferListView = Paginated<StockTransferView>;

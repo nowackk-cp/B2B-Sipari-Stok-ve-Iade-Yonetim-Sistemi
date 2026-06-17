@@ -6,6 +6,8 @@ import type {
   StockBalanceView,
   StockMovementListView,
   StockMovementView,
+  StockTransferListView,
+  StockTransferView,
 } from '@b2b/contracts';
 
 /**
@@ -95,6 +97,43 @@ export class StockBalanceListResponse implements StockBalanceListView {
 export class StockMovementListResponse implements StockMovementListView {
   @ApiProperty({ type: [StockMovementResponse] })
   data!: StockMovementResponse[];
+
+  @ApiProperty({ type: StockPageInfoResponse })
+  pageInfo!: StockPageInfoResponse;
+}
+
+export class StockTransferResponse implements StockTransferView {
+  @ApiProperty({ format: 'uuid', description: 'Public transfer id.' })
+  id!: string;
+
+  @ApiProperty({ format: 'uuid', description: 'Public source warehouse id (on-hand −).' })
+  fromWarehouseId!: string;
+
+  @ApiProperty({ format: 'uuid', description: 'Public destination warehouse id (on-hand +).' })
+  toWarehouseId!: string;
+
+  @ApiProperty({ format: 'uuid', description: 'Public product id.' })
+  productId!: string;
+
+  @ApiProperty({ example: 'SKU-001' })
+  sku!: string;
+
+  @ApiProperty({ example: 'Widget' })
+  name!: string;
+
+  @ApiProperty({ example: '10', description: 'Quantity moved (BIGINT string, positive).' })
+  quantity!: string;
+
+  @ApiProperty({ type: String, nullable: true, example: 'Warehouse transfer' })
+  reason!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  createdAt!: string;
+}
+
+export class StockTransferListResponse implements StockTransferListView {
+  @ApiProperty({ type: [StockTransferResponse] })
+  data!: StockTransferResponse[];
 
   @ApiProperty({ type: StockPageInfoResponse })
   pageInfo!: StockPageInfoResponse;

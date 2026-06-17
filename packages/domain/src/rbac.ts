@@ -249,6 +249,13 @@ export const PERMISSIONS: readonly PermissionDef[] = [
     protected: false,
     description: 'Stock adjustment',
   },
+  {
+    code: 'stock:transfer',
+    module: 'inventory',
+    group: 'INVENTORY',
+    protected: false,
+    description: 'Atomic stock transfer between two warehouses (same company)',
+  },
   // transfers
   {
     code: 'transfer:create',
@@ -645,6 +652,7 @@ const ADMIN_PERMISSIONS: readonly string[] = [
   'stock:read',
   'stock:receive',
   'stock:adjust',
+  'stock:transfer',
   'transfer:create',
   'transfer:approve',
   'transfer:dispatch',
@@ -692,6 +700,7 @@ const WAREHOUSE_MANAGER_PERMISSIONS: readonly string[] = [
   'stock:read',
   'stock:receive',
   'stock:adjust',
+  'stock:transfer',
   'transfer:create',
   'transfer:approve',
   'transfer:dispatch',
