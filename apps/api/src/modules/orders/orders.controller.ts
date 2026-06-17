@@ -108,4 +108,17 @@ export class OrdersController {
   ): Promise<OrderView> {
     return this.orders.cancel(principal, id, dto, requestMeta(req));
   }
+
+  @Post(':id/approve')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('order:approve')
+  @ApiOperation({ summary: 'Approve a DRAFT order (atomically reserves stock).' })
+  @ApiOkResponse({ type: OrderResponse, description: 'The approved order (status APPROVED).' })
+  approve(
+    @CurrentUser() principal: AuthPrincipal,
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<OrderView> {
+    return this.orders.approve(principal, id, requestMeta(req));
+  }
 }

@@ -45,6 +45,13 @@ export const AUDIT_ACTIONS = {
   ORDER_CREATED: 'ORDER_CREATED',
   ORDER_UPDATED: 'ORDER_UPDATED',
   ORDER_CANCELLED: 'ORDER_CANCELLED',
+  // Orders (Order Approval + Stock Reservation Foundation): the DRAFT→APPROVED
+  // transition. Its business audit row is written inside the SAME transaction as
+  // the order status change AND the stock reservation (reserved++ on each
+  // (product, warehouse) balance + the ACTIVE stock_reservations rows). No
+  // stock_ledger movement and no on_hand change occur — a reservation only moves
+  // `reserved` (INVENTORY_RULES §5, ADR-003, ADR-007).
+  ORDER_APPROVED: 'ORDER_APPROVED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

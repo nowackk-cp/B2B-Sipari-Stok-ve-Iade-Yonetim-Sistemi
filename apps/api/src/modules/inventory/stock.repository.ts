@@ -245,6 +245,80 @@ export class StockRepository {
     });
   }
 
+  // --- reservations (order approval) ----------------------------------------
+
+  /**
+   * Ensure the (product, warehouse) balance row exists and LOCK it FOR UPDATE,
+   * returning the current on_hand AND reserved. Mirrors {@link lockBalanceOnHand}
+   * but also surfaces `reserved` so the order-approval reservation can compute
+   * `available = on_hand - reserved` under the lock. The lazy upsert converges two
+   * concurrent first-reservers on one balance row (A-13); the row lock then
+   * serialises every concurrent reservation/adjustment/transfer on that row, so no
+   * lost update and no negative-available race is possible.
+   *
+   * MUST run inside the caller's transaction (the lock is held until commit).
+   */
+  async lockBalanceForReserve(
+    tx: Prisma.TransactionClient,
+    productId: bigint,
+    warehouseId: bigint,
+  ): Promise<{ onHand: bigint; reserved: bigint }> {
+    await tx.$executeRaw`
+      INSERT INTO "stock_balances" ("product_id", "warehouse_id", "on_hand", "reserved", "updated_at")
+      VALUES (${productId}, ${warehouseId}, 0, 0, now())
+      ON CONFLICT ("product_id", "warehouse_id") DO NOTHING`;
+    const rows = await tx.$queryRaw<Array<{ on_hand: bigint; reserved: bigint }>>`
+      SELECT "on_hand", "reserved" FROM "stock_balances"
+      WHERE "product_id" = ${productId} AND "warehouse_id" = ${warehouseId}
+      FOR UPDATE`;
+    // The upsert guarantees exactly one row exists before the locking select.
+    return { onHand: rows[0]!.on_hand, reserved: rows[0]!.reserved };
+  }
+
+  /** Increase the locked balance's reserved by `delta` (row already FOR UPDATE).
+   * The DB CHECK `reserved <= on_hand` is the last-line safety net against
+   * over-reservation; `updated_at` is maintained by the trigger and `version`
+   * bumps for the optional optimistic-control column. */
+  async addReserved(
+    tx: Prisma.TransactionClient,
+    productId: bigint,
+    warehouseId: bigint,
+    delta: bigint,
+  ): Promise<void> {
+    await tx.$executeRaw`
+      UPDATE "stock_balances"
+      SET "reserved" = "reserved" + ${delta}, "version" = "version" + 1
+      WHERE "product_id" = ${productId} AND "warehouse_id" = ${warehouseId}`;
+  }
+
+  /** Insert one ACTIVE stock reservation for an order line. The per-line unique
+   * `idempotency_key` (`ORDER_RESERVATION:{orderId}:{orderItemId}`) and the
+   * `(order_id, order_item_id)` unique are the row-level safety nets against a
+   * duplicate reservation (INVENTORY_RULES §3a). Caller's transaction. */
+  async insertReservation(
+    tx: Prisma.TransactionClient,
+    data: {
+      orderId: bigint;
+      orderItemId: bigint;
+      productId: bigint;
+      warehouseId: bigint;
+      quantity: bigint;
+      idempotencyKey: string;
+    },
+  ): Promise<void> {
+    await tx.stockReservation.create({
+      data: {
+        orderId: data.orderId,
+        orderItemId: data.orderItemId,
+        productId: data.productId,
+        warehouseId: data.warehouseId,
+        quantity: data.quantity,
+        status: 'ACTIVE',
+        idempotencyKey: data.idempotencyKey,
+      },
+    });
+  }
+
   // --- transfers ------------------------------------------------------------
 
   /** Find an existing transfer record by its client idempotency key within a

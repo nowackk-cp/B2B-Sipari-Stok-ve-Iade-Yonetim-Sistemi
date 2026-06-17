@@ -23,6 +23,7 @@ export function toOrderView(row: OrderRow): OrderView {
     items: row.items.map((i) => toOrderItemView(i, row.currency)),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
     cancelledAt: row.cancelledAt ? row.cancelledAt.toISOString() : null,
   };
 }

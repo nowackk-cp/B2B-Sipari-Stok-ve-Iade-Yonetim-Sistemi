@@ -58,10 +58,19 @@ export interface OrderRow {
   notes: string | null;
   createdAt: Date;
   updatedAt: Date;
+  approvedAt: Date | null;
   cancelledAt: Date | null;
   customer: { publicId: string };
   warehouse: { publicId: string };
   items: OrderItemRow[];
+}
+
+/** An order line projected for reservation: the internal ids the inventory
+ * reservation API needs (order item + product) plus the quantity to reserve. */
+export interface ReservationLine {
+  orderItemId: bigint;
+  productId: bigint;
+  quantity: bigint;
 }
 
 /** A computed order line ready to persist (totals already calculated server-side). */
@@ -103,6 +112,7 @@ const ORDER_SELECT = {
   notes: true,
   createdAt: true,
   updatedAt: true,
+  approvedAt: true,
   cancelledAt: true,
   customer: { select: { publicId: true } },
   warehouse: { select: { publicId: true } },
@@ -333,6 +343,47 @@ export class OrderRepository {
     return result.count;
   }
 
+  /**
+   * Lock the order row FOR UPDATE and return its current status (ORDER_RULES §1a
+   * step 1 / ADR-003: the approve transaction takes the order row lock FIRST, then
+   * locks balances — a fixed lock order orders → balances that prevents deadlocks
+   * and serialises concurrent transitions on the same order). Returns null only if
+   * the row vanished. MUST run inside the caller's transaction (lock held to commit).
+   */
+  async lockOrderForUpdate(
+    tx: Prisma.TransactionClient,
+    id: bigint,
+  ): Promise<{ status: string } | null> {
+    const rows = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT "status"::text AS status FROM "orders" WHERE "id" = ${id} FOR UPDATE`;
+    return rows[0] ?? null;
+  }
+
+  /** Transition a DRAFT order to APPROVED with an expected-status conditional
+   * update (status='DRAFT'); sets approved_by/approved_at. Returns the number of
+   * affected rows (0 ⇒ a concurrent transition already moved it → caller 409s).
+   * Caller's transaction (ORDER_RULES §1a step 2). */
+  async approveIfDraft(tx: DbClient, id: bigint, approvedById: bigint, at: Date): Promise<number> {
+    const result = await tx.order.updateMany({
+      where: { id, status: 'DRAFT' },
+      data: { status: 'APPROVED', approvedById, approvedAt: at },
+    });
+    return result.count;
+  }
+
+  /** Read an order's lines as reservation inputs (internal order-item + product
+   * ids and the quantity), ordered by product id ascending so the caller can lock
+   * the (product, warehouse) balances in a deterministic order (ADR-003 §6).
+   * Caller's transaction. */
+  async findReservationLines(tx: DbClient, orderId: bigint): Promise<ReservationLine[]> {
+    const rows = await tx.orderItem.findMany({
+      where: { orderId },
+      select: { id: true, productId: true, quantity: true },
+      orderBy: { productId: 'asc' },
+    });
+    return rows.map((r) => ({ orderItemId: r.id, productId: r.productId, quantity: r.quantity }));
+  }
+
   /** Re-read an order by internal id (post-transition projection). */
   async findById(tx: DbClient, id: bigint): Promise<OrderRow> {
     return tx.order.findUniqueOrThrow({ where: { id }, select: ORDER_SELECT });
@@ -343,8 +394,8 @@ export class OrderRepository {
     tx: DbClient,
     data: {
       orderId: bigint;
-      fromStatus: 'DRAFT' | 'CANCELLED' | null;
-      toStatus: 'DRAFT' | 'CANCELLED';
+      fromStatus: 'DRAFT' | 'APPROVED' | 'CANCELLED' | null;
+      toStatus: 'DRAFT' | 'APPROVED' | 'CANCELLED';
       changedById: bigint;
       reason: string | null;
     },

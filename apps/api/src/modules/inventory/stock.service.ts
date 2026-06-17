@@ -71,6 +71,67 @@ export class StockService {
     private readonly scope: WarehouseScopeService,
   ) {}
 
+  // --- reservation (order approval; cross-module API) -----------------------
+
+  /**
+   * Reserve stock for an order being APPROVED, INSIDE the caller's transaction
+   * (orders → inventory; MODULE_BOUNDARIES §3.1 — orders never writes stock tables
+   * directly, it calls this service). The caller (OrdersService) owns the
+   * transaction, the order row lock and the expected-status transition; this method
+   * only touches inventory-owned tables (`stock_balances`, `stock_reservations`).
+   *
+   * For EVERY line, in a deterministic product-id order (ADR-003 §6 — the order has
+   * a single warehouse, so ordering by product id is a total, deadlock-safe lock
+   * order), it locks the (product, warehouse) balance FOR UPDATE and checks
+   * `available = on_hand - reserved >= quantity`. The check is ALL-OR-NOTHING: a
+   * single shortfall throws {@link ConflictException} (409), which rolls the whole
+   * transaction back, so the order stays DRAFT and NOTHING is reserved (ORDER_RULES
+   * §3). On success it increments `reserved` (NOT `on_hand`) and writes one ACTIVE
+   * `stock_reservations` row per line. No `stock_ledger` movement is written — a
+   * reservation never changes on_hand, so it is not a ledger event (INVENTORY_RULES
+   * §5, STK-3). The DB CHECK `reserved <= on_hand` is the last-line safety net.
+   */
+  async reserve(
+    tx: Prisma.TransactionClient,
+    params: {
+      orderId: bigint;
+      warehouseId: bigint;
+      items: ReadonlyArray<{ orderItemId: bigint; productId: bigint; quantity: bigint }>;
+    },
+  ): Promise<void> {
+    // Deterministic lock order (product id ascending; warehouse is constant for an
+    // order) — prevents deadlocks against concurrent reservations on the same rows.
+    const items = [...params.items].sort((a, b) =>
+      a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0,
+    );
+
+    // Pass 1: lock EVERY balance row and verify availability under the locks. Doing
+    // all checks before any write makes the all-or-nothing guarantee explicit; the
+    // FOR UPDATE locks acquired here are held until commit, so the values cannot
+    // change before pass 2 applies them.
+    for (const item of items) {
+      const bal = await this.repo.lockBalanceForReserve(tx, item.productId, params.warehouseId);
+      const available = bal.onHand - bal.reserved;
+      if (available < item.quantity) {
+        throw new ConflictException('Insufficient available stock to approve the order');
+      }
+    }
+
+    // Pass 2: apply — every line passed, so reserve all (reserved += qty) and write
+    // the ACTIVE reservation rows. on_hand is untouched; no ledger movement.
+    for (const item of items) {
+      await this.repo.addReserved(tx, item.productId, params.warehouseId, item.quantity);
+      await this.repo.insertReservation(tx, {
+        orderId: params.orderId,
+        orderItemId: item.orderItemId,
+        productId: item.productId,
+        warehouseId: params.warehouseId,
+        quantity: item.quantity,
+        idempotencyKey: `ORDER_RESERVATION:${params.orderId.toString()}:${item.orderItemId.toString()}`,
+      });
+    }
+  }
+
   // --- command --------------------------------------------------------------
 
   async adjust(

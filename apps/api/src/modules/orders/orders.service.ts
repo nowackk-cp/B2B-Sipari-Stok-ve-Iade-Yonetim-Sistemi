@@ -20,6 +20,7 @@ import {
   isBigIntStringInRange,
 } from '../../common/validation/is-bigint-string.decorator';
 import { WarehouseScopeService } from '../authorization/warehouse-scope.service';
+import { StockService } from '../inventory/stock.service';
 import {
   OrderRepository,
   type OrderItemWriteData,
@@ -37,6 +38,7 @@ const MAX_LIMIT = 100;
 const ORDER_CREATE = 'order:create';
 const ORDER_UPDATE = 'order:update';
 const ORDER_CANCEL = 'order:cancel';
+const ORDER_APPROVE = 'order:approve';
 const ORDER_NO_RETRIES = 5;
 
 /** Server-priced, totalled lines plus the order's shared currency/totals. */
@@ -49,13 +51,13 @@ interface ComputedLines {
 }
 
 /**
- * Order application service (Order Draft Foundation).
+ * Order application service (Order Draft + Approval Foundation).
  *
- * Covers the DRAFT lifecycle ONLY: create, edit, list, read and cancel a draft —
- * with NO stock effect (no reservation, no ledger, no balance change). Three
- * controls guard every operation, all resolved from PostgreSQL (never a JWT claim
- * or the request body):
- *   1. PERMISSION — the route's `@RequirePermissions` (`order:read/create/update/cancel`).
+ * Covers the DRAFT lifecycle (create, edit, list, read, cancel — NO stock effect)
+ * PLUS approval ({@link approve}: DRAFT→APPROVED with atomic stock reservation).
+ * Three controls guard every operation, all resolved from PostgreSQL (never a JWT
+ * claim or the request body):
+ *   1. PERMISSION — the route's `@RequirePermissions` (`order:read/create/update/cancel/approve`).
  *   2. TENANT — the customer, warehouse and every product are resolved WITHIN
  *      `actor.companyId`; a cross-company id is a 404 (entity hiding). Resolving all
  *      of them inside one company also enforces "they share a company" at the API,
@@ -77,6 +79,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditWriter,
     private readonly scope: WarehouseScopeService,
+    private readonly stock: StockService,
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
@@ -239,6 +242,77 @@ export class OrdersService {
       const order = await this.repo.findById(tx, existing.id);
       await this.audit.write(tx, {
         action: AUDIT_ACTIONS.ORDER_CANCELLED,
+        actor: this.actorSnapshot(actor),
+        entityType: 'order',
+        entityId: order.id,
+        before: this.auditProjection(existing),
+        after: this.auditProjection(order),
+        ip: meta.ip,
+        userAgent: meta.userAgent,
+      });
+      return order;
+    });
+    return toOrderView(updated);
+  }
+
+  /**
+   * Approve a DRAFT order: transition it to APPROVED and atomically reserve stock
+   * for every line (ORDER_RULES §3, ADR-003). The whole thing is ONE transaction —
+   * order transition, reservation, status history and business audit all commit or
+   * all roll back together (ADR-007). Concurrency is handled in three layers
+   * (ORDER_RULES §1a): (1) the order row is locked FOR UPDATE, (2) the DRAFT→APPROVED
+   * transition is an expected-status conditional update (0 rows ⇒ a concurrent
+   * transition already moved it ⇒ 409), and (3) each (product, warehouse) balance is
+   * locked FOR UPDATE in a deterministic order before `reserved` is increased.
+   *
+   * Stock reservation is delegated to {@link StockService.reserve} (the orders
+   * module never writes inventory tables directly — MODULE_BOUNDARIES §3.1), passing
+   * the SAME `tx`. A shortfall on ANY line throws 409 and rolls everything back, so
+   * the order stays DRAFT with no reservation (all-or-nothing). Only `reserved` is
+   * touched — `on_hand` is unchanged and NO `stock_ledger` movement is written
+   * (a reservation is not a physical movement — INVENTORY_RULES §5).
+   */
+  async approve(actor: AuthPrincipal, publicId: string, meta: RequestMeta): Promise<OrderView> {
+    const existing = await this.resolveOrThrow(actor.companyId, publicId);
+    // Object-level scope on the order's warehouse (out of scope → 404, entity hiding).
+    await this.assertObjectScope(actor, existing.warehouseId);
+    // Fast-path 409 for the obvious non-DRAFT case; the transaction below re-checks
+    // under the row lock, so this is not the authority.
+    if (existing.status !== 'DRAFT') {
+      throw new ConflictException('Only DRAFT orders can be approved');
+    }
+    await this.assertWarehouseScope(actor, existing.warehouseId, ORDER_APPROVE);
+
+    const at = this.clock.now();
+    const updated = await this.prisma.transaction(async (tx) => {
+      // (1) Lock the order row FOR UPDATE (lock order: orders → balances).
+      const locked = await this.repo.lockOrderForUpdate(tx, existing.id);
+      if (!locked || locked.status !== 'DRAFT') {
+        throw new ConflictException('Order is no longer DRAFT');
+      }
+      // (2) Expected-status conditional transition DRAFT→APPROVED.
+      const count = await this.repo.approveIfDraft(tx, existing.id, actor.userId, at);
+      if (count === 0) throw new ConflictException('Order is no longer DRAFT');
+      // (3) Read the lines and reserve stock (locks each balance FOR UPDATE, checks
+      // available ≥ qty for ALL lines, then reserved += qty + ACTIVE reservation
+      // rows). Insufficient stock on any line throws 409 → full rollback.
+      const lines = await this.repo.findReservationLines(tx, existing.id);
+      await this.stock.reserve(tx, {
+        orderId: existing.id,
+        warehouseId: existing.warehouseId,
+        items: lines,
+      });
+      // Status history + business audit, same transaction.
+      await this.repo.insertStatusHistory(tx, {
+        orderId: existing.id,
+        fromStatus: 'DRAFT',
+        toStatus: 'APPROVED',
+        changedById: actor.userId,
+        reason: null,
+      });
+      const order = await this.repo.findById(tx, existing.id);
+      await this.audit.write(tx, {
+        action: AUDIT_ACTIONS.ORDER_APPROVED,
         actor: this.actorSnapshot(actor),
         entityType: 'order',
         entityId: order.id,

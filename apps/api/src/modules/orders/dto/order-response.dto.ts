@@ -64,7 +64,10 @@ export class OrderResponse implements OrderView {
   @ApiProperty({ format: 'uuid', description: 'Public source warehouse id.' })
   warehouseId!: string;
 
-  @ApiProperty({ example: 'DRAFT', description: 'Lifecycle status (DRAFT or CANCELLED here).' })
+  @ApiProperty({
+    example: 'DRAFT',
+    description: 'Lifecycle status (DRAFT, APPROVED or CANCELLED here).',
+  })
   status!: string;
 
   @ApiProperty({ example: 'TRY', description: 'ISO 4217 currency shared by every line.' })
@@ -90,6 +93,14 @@ export class OrderResponse implements OrderView {
 
   @ApiProperty({ format: 'date-time' })
   updatedAt!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'date-time',
+    description: 'When the order was approved (stock reserved), or null.',
+  })
+  approvedAt!: string | null;
 
   @ApiProperty({ type: String, nullable: true, format: 'date-time' })
   cancelledAt!: string | null;
