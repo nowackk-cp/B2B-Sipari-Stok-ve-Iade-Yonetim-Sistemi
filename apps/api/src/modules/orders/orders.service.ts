@@ -24,6 +24,7 @@ import { WarehouseScopeService } from '../authorization/warehouse-scope.service'
 import { StockService } from '../inventory/stock.service';
 import {
   OrderRepository,
+  type InvoiceableOrder,
   type OrderItemWriteData,
   type OrderRow,
   type ResolvedProduct,
@@ -514,6 +515,34 @@ export class OrdersService {
     const order = await this.resolveOrThrow(actor.companyId, publicId);
     await this.assertObjectScope(actor, order.warehouseId);
     return toOrderView(order);
+  }
+
+  // --- cross-module read API (billing) --------------------------------------
+
+  /**
+   * Project an order in `companyId` as an invoicing snapshot, or null if it does
+   * not exist in that tenant (Invoice/Billing Foundation). The billing module
+   * calls this instead of reading the orders tables directly — orders owns those
+   * tables (MODULE_BOUNDARIES §2/§5). Read-only; no scope/permission decision is
+   * made here (the caller enforces invoice permission + warehouse scope).
+   */
+  getInvoiceableOrder(companyId: bigint, publicId: string): Promise<InvoiceableOrder | null> {
+    return this.repo.findInvoiceableByPublicId(companyId, publicId);
+  }
+
+  /**
+   * Lock an order row FOR UPDATE inside the CALLER's transaction and return its
+   * current status (Invoice/Billing Foundation). The billing issue transaction
+   * calls this to re-assert `SHIPPED` under the row lock before allocating an
+   * invoice number, serialising against any concurrent order transition. Orders
+   * owns the row lock on its own table; it never opens a new transaction here —
+   * the billing service passes its `tx` down (MODULE_BOUNDARIES §3.1).
+   */
+  lockOrderForInvoicing(
+    tx: Prisma.TransactionClient,
+    orderId: bigint,
+  ): Promise<{ status: string } | null> {
+    return this.repo.lockOrderForUpdate(tx, orderId);
   }
 
   // --- internals ------------------------------------------------------------

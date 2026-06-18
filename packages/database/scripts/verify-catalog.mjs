@@ -113,6 +113,10 @@ async function main() {
   // COMPANY-SCOPED + soft-delete partial, so a code is unique only among a
   // company's active customers and reusable after soft delete.
   requirePartial('customers_code_key', ['deleted_at', 'company_id']);
+  // Invoice/Billing Foundation: at most one ACTIVE (non-VOID) invoice per
+  // (company, order) — a duplicate invoice for the same order is blocked while a
+  // re-invoice after a VOID stays possible.
+  requirePartial('invoices_company_id_order_id_active_key', ['order_id', 'void']);
 
   // 4. CHECK constraints.
   const checks = await prisma.$queryRawUnsafe(`
@@ -201,6 +205,10 @@ async function main() {
     // shipment when an order/warehouse is removed).
     'order_shipments_order_id_company_id_fkey',
     'order_shipments_warehouse_id_company_id_fkey',
+    // Invoice/Billing Foundation: an order-sourced invoice's warehouse is a
+    // company-pinned composite FK; it must RESTRICT so a warehouse that still owns
+    // an invoice cannot be hard-deleted out from under it.
+    'invoices_warehouse_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }

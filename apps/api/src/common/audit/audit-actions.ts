@@ -60,6 +60,11 @@ export const AUDIT_ACTIONS = {
   // and order_status_history append are in that same transaction (ADR-007,
   // ORDER_RULES §5, INVENTORY_RULES §4/§5).
   ORDER_SHIPPED: 'ORDER_SHIPPED',
+  // Billing (Invoice/Billing Foundation): an invoice issued for a SHIPPED order.
+  // Its business audit row is written inside the SAME transaction as the invoice
+  // header + line snapshot + the gapless invoice_series number allocation
+  // (ADR-007, INVOICE_RULES §3, ADR-006).
+  INVOICE_ISSUED: 'INVOICE_ISSUED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -668,6 +668,7 @@ model Warehouse {
   transferRecordsIn  StockTransferRecord[] @relation("StockTransferRecordDest")
   orders             Order[]
   orderShipments     OrderShipment[]
+  invoices           Invoice[]
 
   // Warehouse code identity is (company, code): the same code may exist across
   // companies. The TASK-012 management migration converts this to a PARTIAL
@@ -1004,6 +1005,7 @@ model OrderItem {
   reservations   StockReservation[]
   priceOverrides OrderPriceOverride[]
   returnItems    ReturnItem[]
+  invoiceItems   InvoiceItem[]
 
   @@unique([orderId, productId])
   @@index([companyId])
@@ -1204,11 +1206,22 @@ model Invoice {
   fiscalYear       Int?          @map("fiscal_year")
   customerId       BigInt        @map("customer_id")
   orderId          BigInt?       @map("order_id")
+  // Source warehouse (Invoice/Billing Foundation): an order-sourced invoice
+  // inherits the order's warehouse so the read endpoints can scope-filter by it,
+  // exactly like orders. Carried with `company_id` in a composite FK so the
+  // warehouse always belongs to the invoice's tenant. Nullable for future
+  // non-order documents (e.g. credit notes) that may not bind a warehouse.
+  warehouseId      BigInt?       @map("warehouse_id")
   status           InvoiceStatus @default(DRAFT)
   currency         String        @default("TRY") @db.Char(3)
   subtotalAmount   BigInt        @default(0) @map("subtotal_amount")
   taxAmount        BigInt        @default(0) @map("tax_amount")
   grandTotalAmount BigInt        @default(0) @map("grand_total_amount")
+  // Client idempotency key for `POST /orders/:id/invoice` (Invoice/Billing
+  // Foundation). A same-key replay returns the existing invoice; a same-key
+  // reuse for a different order/payload is a 409. Internal — never in the public
+  // contract. Nullable so non-idempotent/legacy invoice creation paths coexist.
+  idempotencyKey   String?       @map("idempotency_key")
   issuedAt         DateTime?     @map("issued_at") @db.Timestamptz(6)
   dueDate          DateTime?     @map("due_date") @db.Date
   paidAt           DateTime?     @map("paid_at") @db.Timestamptz(6)
@@ -1220,6 +1233,10 @@ model Invoice {
   series    InvoiceSeries? @relation(fields: [seriesId], references: [id], onDelete: Restrict)
   customer  Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
   order     Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  // Composite FK pins the warehouse to THIS company (tenant invariant), like
+  // orders.(warehouse_id, company_id). onDelete: Restrict — a warehouse that
+  // still owns an invoice cannot be hard-deleted.
+  warehouse Warehouse?     @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
   createdBy User           @relation("InvoiceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
 
   items         InvoiceItem[]
@@ -1229,9 +1246,20 @@ model Invoice {
   // A-01: gapless invoice numbering uniqueness. NULL invoice_number rows
   // (DRAFT) do not collide under PostgreSQL NULLS DISTINCT semantics.
   @@unique([companyId, seriesId, fiscalYear, invoiceNumber])
+  // Client idempotency replay: at most one invoice per (company, key). NULL keys
+  // do not collide (NULLS DISTINCT), so legacy keyless invoices coexist.
+  @@unique([companyId, idempotencyKey])
+  // At most one ACTIVE (non-VOID) invoice per (company, order). The init/Billing
+  // migration converts this to a PARTIAL unique
+  // (`WHERE order_id IS NOT NULL AND status <> 'VOID'`), preserving the index
+  // name, so a re-invoice after VOID is allowed while a duplicate active invoice
+  // for the same order is blocked. Prisma cannot model the predicate, so the
+  // structural drift diff sees a plain unique (allowlisted in drift-eval).
+  @@unique([companyId, orderId], map: "invoices_company_id_order_id_active_key")
   @@index([customerId])
   @@index([status])
   @@index([orderId])
+  @@index([warehouseId])
   @@index([issuedAt])
   @@map("invoices")
 }
@@ -1240,6 +1268,11 @@ model InvoiceItem {
   id                 BigInt  @id @default(autoincrement())
   invoiceId          BigInt  @map("invoice_id")
   productId          BigInt? @map("product_id")
+  // Source order line (Invoice/Billing Foundation): an order-sourced invoice line
+  // is a frozen snapshot of an order_items row; this links back for traceability.
+  // Nullable + SET NULL so deleting the order line never blocks/erases the issued
+  // invoice (an issued invoice is immutable — INVOICE_RULES §2).
+  orderItemId        BigInt? @map("order_item_id")
   description        String
   quantity           BigInt
   unitPriceAmount    BigInt  @map("unit_price_amount")
@@ -1248,10 +1281,12 @@ model InvoiceItem {
   lineTaxAmount      BigInt  @map("line_tax_amount")
   lineTotalAmount    BigInt  @map("line_total_amount")
 
-  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
-  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  invoice   Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  product   Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
+  orderItem OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
 
   @@index([invoiceId])
+  @@index([orderItemId])
   @@map("invoice_items")
 }
 

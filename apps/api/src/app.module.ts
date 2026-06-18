@@ -20,6 +20,7 @@ import { WarehousesModule } from './modules/warehouses/warehouses.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { OrdersModule } from './modules/orders/orders.module';
+import { InvoicesModule } from './modules/invoices/invoices.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { OrdersModule } from './modules/orders/orders.module';
     InventoryModule,
     CustomersModule,
     OrdersModule,
+    InvoicesModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

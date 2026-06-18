@@ -13,6 +13,10 @@ export const ALLOWED_DRIFT_STATEMENTS = [
   'CREATE UNIQUE INDEX "products_sku_key" ON "products"("company_id", "sku")',
   'CREATE UNIQUE INDEX "users_email_key" ON "users"("email")',
   'CREATE UNIQUE INDEX "warehouses_code_key" ON "warehouses"("company_id", "code")',
+  // Invoice/Billing Foundation: the active-invoice-per-order unique is a PARTIAL
+  // unique (`WHERE order_id IS NOT NULL AND status <> 'VOID'`); the datamodel has
+  // no predicate so the diff reports the plain unique as "to be added".
+  'CREATE UNIQUE INDEX "invoices_company_id_order_id_active_key" ON "invoices"("company_id", "order_id")',
 ];
 
 export function normalize(sql) {

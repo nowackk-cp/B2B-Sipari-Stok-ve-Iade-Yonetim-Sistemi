@@ -83,6 +83,42 @@ export interface ShipmentRow {
   idempotencyKey: string;
 }
 
+/** A frozen order line projected for invoicing: the internal ids billing needs to
+ * snapshot an invoice line plus the product public id for the read view. */
+export interface InvoiceableOrderItem {
+  orderItemId: bigint;
+  productId: bigint;
+  productPublicId: string;
+  productSku: string;
+  productName: string;
+  quantity: bigint;
+  unitPriceAmount: bigint;
+  taxRateBp: number;
+  lineSubtotalAmount: bigint;
+  lineTaxAmount: bigint;
+  lineTotalAmount: bigint;
+}
+
+/** A snapshot of an order for billing (Invoice/Billing Foundation). Carries the
+ * internal ids the billing tables store as FKs (order, customer, warehouse) plus
+ * the frozen line amounts — read through the orders service so billing never
+ * touches the orders tables directly (MODULE_BOUNDARIES §5). */
+export interface InvoiceableOrder {
+  id: bigint;
+  publicId: string;
+  status: string;
+  companyId: bigint;
+  customerId: bigint;
+  customerPublicId: string;
+  warehouseId: bigint;
+  warehousePublicId: string;
+  currency: string;
+  subtotalAmount: bigint;
+  taxAmount: bigint;
+  grandTotalAmount: bigint;
+  items: InvoiceableOrderItem[];
+}
+
 /** A computed order line ready to persist (totals already calculated server-side). */
 export interface OrderItemWriteData {
   productId: bigint;
@@ -469,6 +505,79 @@ export class OrderRepository {
   /** Re-read an order by internal id (post-transition projection). */
   async findById(tx: DbClient, id: bigint): Promise<OrderRow> {
     return tx.order.findUniqueOrThrow({ where: { id }, select: ORDER_SELECT });
+  }
+
+  // --- invoicing (billing reads order data through the orders service) -------
+
+  /** Project an order WITHIN a company as an invoicing snapshot: the internal ids
+   * billing stores as FKs plus the frozen line amounts (Invoice/Billing
+   * Foundation). A cross-tenant id yields null (the service maps that to a 404). */
+  async findInvoiceableByPublicId(
+    companyId: bigint,
+    publicId: string,
+    executor?: DbClient,
+  ): Promise<InvoiceableOrder | null> {
+    const order = await this.db(executor).order.findFirst({
+      where: { publicId, companyId },
+      select: {
+        id: true,
+        publicId: true,
+        status: true,
+        companyId: true,
+        customerId: true,
+        warehouseId: true,
+        currency: true,
+        subtotalAmount: true,
+        taxAmount: true,
+        grandTotalAmount: true,
+        customer: { select: { publicId: true } },
+        warehouse: { select: { publicId: true } },
+        items: {
+          orderBy: { id: 'asc' },
+          select: {
+            id: true,
+            productId: true,
+            productSku: true,
+            productName: true,
+            quantity: true,
+            unitPriceAmount: true,
+            taxRateBp: true,
+            lineSubtotalAmount: true,
+            lineTaxAmount: true,
+            lineTotalAmount: true,
+            product: { select: { publicId: true } },
+          },
+        },
+      },
+    });
+    if (!order) return null;
+    return {
+      id: order.id,
+      publicId: order.publicId,
+      status: order.status,
+      companyId: order.companyId,
+      customerId: order.customerId,
+      customerPublicId: order.customer.publicId,
+      warehouseId: order.warehouseId,
+      warehousePublicId: order.warehouse.publicId,
+      currency: order.currency,
+      subtotalAmount: order.subtotalAmount,
+      taxAmount: order.taxAmount,
+      grandTotalAmount: order.grandTotalAmount,
+      items: order.items.map((i) => ({
+        orderItemId: i.id,
+        productId: i.productId,
+        productPublicId: i.product.publicId,
+        productSku: i.productSku,
+        productName: i.productName,
+        quantity: i.quantity,
+        unitPriceAmount: i.unitPriceAmount,
+        taxRateBp: i.taxRateBp,
+        lineSubtotalAmount: i.lineSubtotalAmount,
+        lineTaxAmount: i.lineTaxAmount,
+        lineTotalAmount: i.lineTotalAmount,
+      })),
+    };
   }
 
   // --- shipments (order shipment / stock commit) ----------------------------
