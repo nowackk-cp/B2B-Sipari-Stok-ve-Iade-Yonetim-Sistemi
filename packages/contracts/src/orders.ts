@@ -9,10 +9,10 @@
  * a minor-unit STRING (never a JS number — precision safety, §5); quantities are
  * BIGINT strings; VAT is basis points (integer).
  *
- * This slice covers the DRAFT lifecycle plus approval: an order is created,
- * edited, cancelled and (Order Approval + Stock Reservation Foundation) approved.
- * `status` is therefore one of `DRAFT` | `APPROVED` | `CANCELLED` here (the
- * prepare/ship transitions are a later slice).
+ * This slice covers the DRAFT lifecycle, approval and shipment: an order is
+ * created, edited, cancelled, approved (stock reserved) and (Order Shipment /
+ * Stock Commit Foundation) shipped (reserved stock physically committed). `status`
+ * is therefore one of `DRAFT` | `APPROVED` | `SHIPPED` | `CANCELLED` here.
  */
 
 import type { MoneyView } from './products';
@@ -50,7 +50,7 @@ export interface OrderView {
   customerId: string;
   /** Public UUID of the source warehouse. */
   warehouseId: string;
-  /** Lifecycle status — `DRAFT`, `APPROVED` or `CANCELLED` in this slice. */
+  /** Lifecycle status — `DRAFT`, `APPROVED`, `SHIPPED` or `CANCELLED` in this slice. */
   status: string;
   /** ISO 4217 currency shared by every line. */
   currency: string;
@@ -68,6 +68,8 @@ export interface OrderView {
   updatedAt: string;
   /** When the order was approved (stock reserved), or null if not yet approved. */
   approvedAt: string | null;
+  /** When the order was shipped (stock committed), or null if not yet shipped. */
+  shippedAt: string | null;
   /** When the order was cancelled, or null while it is still DRAFT. */
   cancelledAt: string | null;
 }

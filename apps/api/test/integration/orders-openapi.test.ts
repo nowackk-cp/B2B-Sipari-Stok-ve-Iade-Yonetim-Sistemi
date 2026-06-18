@@ -73,6 +73,12 @@ describe('Order OpenAPI response schemas', () => {
     );
   });
 
+  it('emits a non-empty order ship (200) schema referencing OrderResponse', () => {
+    expect(successSchema('/api/v1/orders/{id}/ship', 'post')?.$ref).toBe(
+      '#/components/schemas/OrderResponse',
+    );
+  });
+
   it('documents the OrderResponse fields (including nested items)', () => {
     const props = schemas().OrderResponse?.properties ?? {};
     for (const field of [
@@ -90,6 +96,7 @@ describe('Order OpenAPI response schemas', () => {
       'createdAt',
       'updatedAt',
       'approvedAt',
+      'shippedAt',
       'cancelledAt',
     ]) {
       expect(props, `OrderResponse.${field}`).toHaveProperty(field);

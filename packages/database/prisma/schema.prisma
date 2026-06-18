@@ -312,6 +312,7 @@ model User {
 
   ordersCreated          Order[]                 @relation("OrderCreatedBy")
   ordersApproved         Order[]                 @relation("OrderApprovedBy")
+  orderShipmentsCreated  OrderShipment[]         @relation("OrderShipmentCreatedBy")
   orderStatusChanges     OrderStatusHistory[]    @relation("OrderStatusHistoryChangedBy")
   priceOverridesActor    OrderPriceOverride[]    @relation("OrderPriceOverrideActor")
   priceOverridesApprover OrderPriceOverride[]    @relation("OrderPriceOverrideApprovedBy")
@@ -666,6 +667,7 @@ model Warehouse {
   transferRecordsOut StockTransferRecord[] @relation("StockTransferRecordSource")
   transferRecordsIn  StockTransferRecord[] @relation("StockTransferRecordDest")
   orders             Order[]
+  orderShipments     OrderShipment[]
 
   // Warehouse code identity is (company, code): the same code may exist across
   // companies. The TASK-012 management migration converts this to a PARTIAL
@@ -962,6 +964,7 @@ model Order {
   statusHistory  OrderStatusHistory[]
   priceOverrides OrderPriceOverride[]
   reservations   StockReservation[]
+  shipments      OrderShipment[]
   invoices       Invoice[]
   returns        Return[]
 
@@ -1045,6 +1048,49 @@ model OrderPriceOverride {
   @@index([orderId])
   @@index([orderItemId])
   @@map("order_price_overrides")
+}
+
+/// Atomic order shipment / stock-commit command record (Order Shipment Foundation).
+///
+/// One IMMUTABLE row per accepted `POST /orders/:id/ship`: an APPROVED order whose
+/// reserved stock is physically committed in ONE transaction (on_hand−, reserved−,
+/// each line's ACTIVE reservation → CONSUMED, one SHIPMENT `stock_ledger` movement
+/// per line). This is distinct from the planned multi-step shipment workflow; this
+/// foundation performs the APPROVED→SHIPPED commit atomically.
+///
+/// Tenant safety is a DB invariant: `company_id` is carried explicitly and the two
+/// composite FKs pin order.company = warehouse.company = this company, so a
+/// cross-company shipment is physically un-insertable (not merely rejected in
+/// code). The row is append-only — a `prevent_mutation` trigger blocks UPDATE/DELETE
+/// — and there is at most ONE shipment per order (`order_id` unique). Idempotent per
+/// client: `(company_id, idempotency_key)` is unique, so a same-key replay finds
+/// this row and commits no second shipment/movement.
+model OrderShipment {
+  id             BigInt   @id @default(autoincrement())
+  publicId       String   @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  companyId      BigInt   @map("company_id")
+  orderId        BigInt   @map("order_id")
+  warehouseId    BigInt   @map("warehouse_id")
+  status         String   @default("SHIPPED")
+  shippedAt      DateTime @default(now()) @map("shipped_at") @db.Timestamptz(6)
+  idempotencyKey String   @map("idempotency_key")
+  createdById    BigInt   @map("created_by_user_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Composite FKs pin both endpoints to THIS company. onDelete: Restrict — an
+  // order/warehouse that still owns a shipment cannot be hard-deleted.
+  order     Order     @relation(fields: [orderId, companyId], references: [id, companyId], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdBy User      @relation("OrderShipmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  // Idempotency: a replay finds the row by (company, key). At most one shipment per
+  // order (order_id unique) — the order row lock + APPROVED→SHIPPED guard is the
+  // primary serialiser; this unique is the row-level last-line safety net.
+  @@unique([companyId, idempotencyKey])
+  @@unique([orderId])
+  @@index([companyId, createdAt])
+  @@index([warehouseId])
+  @@map("order_shipments")
 }
 
 model CommandIdempotency {

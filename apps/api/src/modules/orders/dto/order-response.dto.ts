@@ -102,6 +102,14 @@ export class OrderResponse implements OrderView {
   })
   approvedAt!: string | null;
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'date-time',
+    description: 'When the order was shipped (stock committed), or null.',
+  })
+  shippedAt!: string | null;
+
   @ApiProperty({ type: String, nullable: true, format: 'date-time' })
   cancelledAt!: string | null;
 }

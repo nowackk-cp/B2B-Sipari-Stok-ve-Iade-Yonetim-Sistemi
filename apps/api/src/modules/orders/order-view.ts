@@ -24,6 +24,7 @@ export function toOrderView(row: OrderRow): OrderView {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
+    shippedAt: row.shippedAt ? row.shippedAt.toISOString() : null,
     cancelledAt: row.cancelledAt ? row.cancelledAt.toISOString() : null,
   };
 }

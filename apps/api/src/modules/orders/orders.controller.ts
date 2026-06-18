@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -13,6 +14,7 @@ import {
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
+  ApiHeader,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -120,5 +122,26 @@ export class OrdersController {
     @Req() req: Request,
   ): Promise<OrderView> {
     return this.orders.approve(principal, id, requestMeta(req));
+  }
+
+  @Post(':id/ship')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('order:ship')
+  @ApiOperation({
+    summary: 'Ship an APPROVED order (atomically commits reserved stock: on_hand−, reserved−).',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Client-generated key; a replay returns the same shipped order (no duplicate).',
+  })
+  @ApiOkResponse({ type: OrderResponse, description: 'The shipped order (status SHIPPED).' })
+  ship(
+    @CurrentUser() principal: AuthPrincipal,
+    @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() req: Request,
+  ): Promise<OrderView> {
+    return this.orders.ship(principal, id, idempotencyKey, requestMeta(req));
   }
 }

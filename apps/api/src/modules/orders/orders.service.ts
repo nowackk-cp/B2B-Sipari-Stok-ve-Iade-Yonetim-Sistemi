@@ -40,6 +40,7 @@ const ORDER_CREATE = 'order:create';
 const ORDER_UPDATE = 'order:update';
 const ORDER_CANCEL = 'order:cancel';
 const ORDER_APPROVE = 'order:approve';
+const ORDER_SHIP = 'order:ship';
 const ORDER_NO_RETRIES = 5;
 
 /** Server-priced, totalled lines plus the order's shared currency/totals. */
@@ -337,6 +338,146 @@ export class OrdersService {
     return toOrderView(updated);
   }
 
+  /**
+   * Ship an APPROVED order: transition it to SHIPPED and atomically COMMIT the
+   * reserved stock for every line (ORDER_RULES §5, INVENTORY_RULES §4/§5). The
+   * whole thing is ONE transaction — order transition, the per-line stock commit
+   * (on_hand−− & reserved−−, reservation ACTIVE→CONSUMED, one SHIPMENT ledger
+   * movement), the immutable shipment record, status history and business audit all
+   * commit or all roll back together (ADR-007). Concurrency is the same three layers
+   * as approve (ORDER_RULES §1a): (1) the order row is locked FOR UPDATE, (2) the
+   * APPROVED→SHIPPED transition is an expected-status conditional update, and (3)
+   * each (product, warehouse) balance is locked FOR UPDATE in a deterministic order.
+   *
+   * `Idempotency-Key` is MANDATORY. A same-key replay returns the same SHIPPED order
+   * and commits nothing twice; the same key reused for a DIFFERENT order is a 409; an
+   * already-SHIPPED order is a same-key replay or a 409 for a different key. The
+   * physical commit is delegated to {@link StockService.consumeReservations} (orders
+   * never writes stock tables directly — MODULE_BOUNDARIES §3.1), passing the SAME
+   * `tx`. NO invoice and NO return are created here.
+   */
+  async ship(
+    actor: AuthPrincipal,
+    publicId: string,
+    idempotencyKey: string | undefined,
+    meta: RequestMeta,
+  ): Promise<OrderView> {
+    // Idempotency-Key is mandatory for this stock-committing mutation (rejected
+    // before any side effect — task idempotency rules).
+    const key = idempotencyKey?.trim();
+    if (!key) {
+      throw new BadRequestException('Idempotency-Key header is required for order shipments');
+    }
+
+    const existing = await this.resolveOrThrow(actor.companyId, publicId);
+    // Object-level scope on the order's warehouse (out of scope → 404, entity hiding).
+    await this.assertObjectScope(actor, existing.warehouseId);
+
+    // Idempotency replay (pre-transaction): a shipment already recorded under THIS
+    // key. Same order → replay the SHIPPED order; a different order → 409.
+    const byKey = await this.repo.findShipmentByKey(actor.companyId, key);
+    if (byKey) {
+      if (byKey.orderId !== existing.id) {
+        throw new ConflictException('Idempotency-Key was reused for a different order');
+      }
+      return toOrderView(await this.resolveOrThrow(actor.companyId, publicId));
+    }
+
+    // No shipment under this key yet. An already-SHIPPED order with a DIFFERENT key
+    // is a conflict (the order can only ship once); a non-APPROVED order cannot ship.
+    if (existing.status === 'SHIPPED') {
+      throw new ConflictException('Order has already been shipped');
+    }
+    if (existing.status !== 'APPROVED') {
+      throw new ConflictException('Only APPROVED orders can be shipped');
+    }
+    // Beyond object scope, the actor must hold order:ship scoped to this warehouse.
+    await this.assertWarehouseScope(actor, existing.warehouseId, ORDER_SHIP);
+
+    const at = this.clock.now();
+    try {
+      const updated = await this.prisma.transaction(async (tx) => {
+        // (1) Lock the order row FOR UPDATE (lock order: orders → balances).
+        const locked = await this.repo.lockOrderForUpdate(tx, existing.id);
+        if (!locked) throw new ConflictException('Order is no longer shippable');
+        // A concurrent ship committed between the pre-check and this lock. If it used
+        // the SAME key, serve a replay; otherwise the order is already shipped → 409.
+        if (locked.status === 'SHIPPED') {
+          const shp = await this.repo.findShipmentByOrderId(tx, existing.id);
+          if (shp && shp.idempotencyKey === key) {
+            return this.repo.findById(tx, existing.id);
+          }
+          throw new ConflictException('Order has already been shipped');
+        }
+        // (2) Expected-status conditional transition APPROVED→SHIPPED.
+        if (locked.status !== 'APPROVED') {
+          throw new ConflictException('Only APPROVED orders can be shipped');
+        }
+        const count = await this.repo.shipIfApproved(tx, existing.id, at);
+        if (count === 0) throw new ConflictException('Order is no longer APPROVED');
+        // (2b) Revalidate every line's product AND the warehouse are still active/
+        // non-deleted under a row lock BEFORE any balance is committed (a product or
+        // warehouse made inactive/soft-deleted after approval blocks shipment, 422).
+        await this.assertOrderProductsStillActive(tx, existing.id, actor.companyId);
+        await this.assertWarehouseStillActive(tx, existing.warehouseId);
+        // (3) Read the lines and commit the reserved stock (locks each balance FOR
+        // UPDATE, checks reserved/on_hand ≥ qty for ALL lines, then on_hand−=qty,
+        // reserved−=qty, reservation CONSUMED, SHIPMENT ledger). Any shortfall or
+        // missing reservation throws 409 → full rollback (order stays APPROVED).
+        const lines = await this.repo.findReservationLines(tx, existing.id);
+        await this.stock.consumeReservations(tx, {
+          orderId: existing.id,
+          warehouseId: existing.warehouseId,
+          createdById: actor.userId,
+          at,
+          items: lines.map((l) => ({ orderItemId: l.orderItemId, productId: l.productId })),
+        });
+        // Immutable shipment record (idempotency anchor) + status history + audit,
+        // all in this transaction.
+        await this.repo.insertShipment(tx, {
+          companyId: actor.companyId,
+          orderId: existing.id,
+          warehouseId: existing.warehouseId,
+          idempotencyKey: key,
+          createdById: actor.userId,
+          at,
+        });
+        await this.repo.insertStatusHistory(tx, {
+          orderId: existing.id,
+          fromStatus: 'APPROVED',
+          toStatus: 'SHIPPED',
+          changedById: actor.userId,
+          reason: null,
+        });
+        const order = await this.repo.findById(tx, existing.id);
+        await this.audit.write(tx, {
+          action: AUDIT_ACTIONS.ORDER_SHIPPED,
+          actor: this.actorSnapshot(actor),
+          entityType: 'order',
+          entityId: order.id,
+          before: this.auditProjection(existing),
+          after: this.auditProjection(order),
+          ip: meta.ip,
+          userAgent: meta.userAgent,
+        });
+        return order;
+      });
+      return toOrderView(updated);
+    } catch (err) {
+      // A concurrent request with the SAME key won the (company, key) / order_id
+      // race: the whole transaction rolled back with no side effects. Re-read and
+      // replay the winner (same order) or surface the different-order conflict.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const row = await this.repo.findShipmentByKey(actor.companyId, key);
+        if (row && row.orderId === existing.id) {
+          return toOrderView(await this.resolveOrThrow(actor.companyId, publicId));
+        }
+        throw new ConflictException('Order has already been shipped');
+      }
+      throw err;
+    }
+  }
+
   // --- reads ----------------------------------------------------------------
 
   async list(actor: AuthPrincipal, query: ListOrdersQuery): Promise<OrderListView> {
@@ -536,6 +677,25 @@ export class OrdersService {
           'An order line product is no longer active and cannot be approved',
         );
       }
+    }
+  }
+
+  /**
+   * Re-validate at SHIP time that the order's warehouse is still operable: an ACTIVE
+   * (`is_active = true`), non-soft-deleted (`deleted_at IS NULL`) row. Runs inside
+   * the ship transaction, locking the warehouse row FOR SHARE (see
+   * {@link OrderRepository.lockWarehouseForShipment}) so a concurrent deactivate/
+   * soft-delete is serialised. A stale warehouse throws 422 BUSINESS_RULE, rolling
+   * the whole transaction back so the order stays APPROVED with no stock commit. */
+  private async assertWarehouseStillActive(
+    tx: Prisma.TransactionClient,
+    warehouseId: bigint,
+  ): Promise<void> {
+    const warehouse = await this.repo.lockWarehouseForShipment(tx, warehouseId);
+    if (!warehouse || !warehouse.isActive || warehouse.deletedAt !== null) {
+      throw new UnprocessableEntityException(
+        'The order warehouse is no longer active and cannot ship',
+      );
     }
   }
 

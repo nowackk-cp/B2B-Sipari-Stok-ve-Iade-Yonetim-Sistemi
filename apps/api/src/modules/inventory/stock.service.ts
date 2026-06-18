@@ -132,6 +132,106 @@ export class StockService {
     }
   }
 
+  /**
+   * Commit (ship) an order's reserved stock, INSIDE the caller's transaction
+   * (orders → inventory; MODULE_BOUNDARIES §3.1 — orders never writes stock tables
+   * directly). The caller (OrdersService) owns the transaction, the order row lock
+   * and the APPROVED→SHIPPED expected-status transition; this method only touches
+   * inventory-owned tables (`stock_balances`, `stock_reservations`, `stock_ledger`).
+   *
+   * For EVERY line, in a deterministic product-id order (ADR-003 §6 — single
+   * warehouse, so ordering by product id is a total, deadlock-safe lock order), it:
+   *   1. resolves the line's ACTIVE reservation (a missing reservation throws 409 —
+   *      ORDER_RULES §5: every line must be reserved before it can ship), and
+   *   2. locks the (product, warehouse) balance FOR UPDATE and verifies
+   *      `reserved >= qty` AND `on_hand >= qty`.
+   * Both checks are ALL-OR-NOTHING (pass 1): a single shortfall/missing reservation
+   * throws {@link ConflictException} (409), rolling the whole transaction back so
+   * NOTHING ships (the order stays APPROVED). On success (pass 2) it commits each
+   * line: `on_hand -= qty` AND `reserved -= qty` together, the reservation ACTIVE→
+   * CONSUMED, and one append-only SHIPMENT `stock_ledger` movement (quantity
+   * NEGATIVE, keyed `ORDER_SHIPMENT:{orderId}:{orderItemId}` so a retry can never
+   * duplicate it). The DB CHECKs `on_hand >= 0` / `reserved >= 0` are the last-line
+   * safety nets (INVENTORY_RULES §4/§5, ORDER_RULES §5).
+   */
+  async consumeReservations(
+    tx: Prisma.TransactionClient,
+    params: {
+      orderId: bigint;
+      warehouseId: bigint;
+      createdById: bigint;
+      at: Date;
+      items: ReadonlyArray<{ orderItemId: bigint; productId: bigint }>;
+    },
+  ): Promise<void> {
+    // Deterministic lock order (product id ascending; warehouse is constant for an
+    // order) — prevents deadlocks against concurrent stock ops on the same rows.
+    const items = [...params.items].sort((a, b) =>
+      a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0,
+    );
+
+    // Pass 1: resolve every reservation, lock every balance and verify both
+    // invariants under the locks. Doing all checks before any write makes the
+    // all-or-nothing guarantee explicit; the FOR UPDATE locks are held to commit.
+    const plan: Array<{
+      orderItemId: bigint;
+      productId: bigint;
+      reservationId: bigint;
+      quantity: bigint;
+      onHand: bigint;
+    }> = [];
+    for (const item of items) {
+      const reservation = await this.repo.findActiveReservation(
+        tx,
+        params.orderId,
+        item.orderItemId,
+      );
+      if (!reservation) {
+        throw new ConflictException('Order line has no active reservation to ship');
+      }
+      const bal = await this.repo.lockBalanceForReserve(tx, item.productId, params.warehouseId);
+      // on_hand is checked before reserved. Under the DB invariant reserved <=
+      // on_hand they normally move together, but a corrupted/tampered balance can
+      // violate either independently; both are guarded (fail closed → 409 + rollback).
+      if (bal.onHand < reservation.quantity) {
+        throw new ConflictException('On-hand stock is less than the shipment quantity');
+      }
+      if (bal.reserved < reservation.quantity) {
+        throw new ConflictException('Reserved stock is less than the shipment quantity');
+      }
+      plan.push({
+        orderItemId: item.orderItemId,
+        productId: item.productId,
+        reservationId: reservation.id,
+        quantity: reservation.quantity,
+        onHand: bal.onHand,
+      });
+    }
+
+    // Pass 2: apply — every line passed, so ship all (on_hand−=qty, reserved−=qty),
+    // consume the reservation and append the SHIPMENT ledger movement (qty negative).
+    for (const line of plan) {
+      const balanceAfter = line.onHand - line.quantity;
+      await this.repo.shipBalance(tx, line.productId, params.warehouseId, line.quantity);
+      const consumed = await this.repo.consumeReservation(tx, line.reservationId, params.at);
+      if (consumed === 0) {
+        // The reservation left ACTIVE between pass 1 and here (cannot happen under
+        // the order row lock, but defended): fail closed → full rollback.
+        throw new ConflictException('Order line reservation is no longer active');
+      }
+      await this.repo.insertShipmentMovement(tx, {
+        productId: line.productId,
+        warehouseId: params.warehouseId,
+        quantitySigned: -line.quantity,
+        balanceAfter,
+        orderId: params.orderId,
+        orderItemId: line.orderItemId,
+        idempotencyKey: `ORDER_SHIPMENT:${params.orderId.toString()}:${line.orderItemId.toString()}`,
+        createdById: params.createdById,
+      });
+    }
+  }
+
   // --- command --------------------------------------------------------------
 
   async adjust(

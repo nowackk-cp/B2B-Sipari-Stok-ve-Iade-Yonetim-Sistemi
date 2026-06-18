@@ -319,6 +319,93 @@ export class StockRepository {
     });
   }
 
+  /**
+   * Read an order line's ACTIVE reservation (order ship / stock commit). Returns
+   * the reservation id + reserved quantity, or null when the line has no ACTIVE
+   * reservation (→ the caller fails the ship 409, ORDER_RULES §5). The order row
+   * lock held by the caller (OrdersService) serialises every transition on this
+   * order, so the reservation state read here is stable for the transaction.
+   */
+  async findActiveReservation(
+    tx: Prisma.TransactionClient,
+    orderId: bigint,
+    orderItemId: bigint,
+  ): Promise<{ id: bigint; quantity: bigint } | null> {
+    return tx.stockReservation.findFirst({
+      where: { orderId, orderItemId, status: 'ACTIVE' },
+      select: { id: true, quantity: true },
+    });
+  }
+
+  /** Commit a shipment against the locked balance: on_hand−=qty AND reserved−=qty
+   * together (row already FOR UPDATE). The DB CHECKs `on_hand >= 0` and
+   * `reserved >= 0` are the last-line safety nets; `version` bumps the optimistic
+   * column. Caller's transaction. */
+  async shipBalance(
+    tx: Prisma.TransactionClient,
+    productId: bigint,
+    warehouseId: bigint,
+    quantity: bigint,
+  ): Promise<void> {
+    await tx.$executeRaw`
+      UPDATE "stock_balances"
+      SET "on_hand" = "on_hand" - ${quantity},
+          "reserved" = "reserved" - ${quantity},
+          "version" = "version" + 1
+      WHERE "product_id" = ${productId} AND "warehouse_id" = ${warehouseId}`;
+  }
+
+  /** Consume an ACTIVE reservation (ACTIVE→CONSUMED, stamp consumed_at) with an
+   * expected-status conditional update; returns the affected-row count (0 ⇒ it was
+   * already released/consumed → the caller treats it as a conflict). Caller's
+   * transaction (INVENTORY_RULES §4). */
+  async consumeReservation(
+    tx: Prisma.TransactionClient,
+    reservationId: bigint,
+    at: Date,
+  ): Promise<number> {
+    const result = await tx.stockReservation.updateMany({
+      where: { id: reservationId, status: 'ACTIVE' },
+      data: { status: 'CONSUMED', consumedAt: at },
+    });
+    return result.count;
+  }
+
+  /** Append one immutable SHIPMENT movement to the ledger (quantity NEGATIVE), the
+   * physical stock-out of an order line. Correlated to its order via
+   * `reference_type='ORDER_SHIPMENT', reference_id=orderId, reference_line_id=
+   * orderItemId`. The per-line idempotency key (`ORDER_SHIPMENT:{orderId}:{orderItemId}`)
+   * is unique, so a retried shipment cannot append a second movement (INVENTORY_RULES
+   * §3a, STK-6). Caller's transaction. */
+  async insertShipmentMovement(
+    tx: Prisma.TransactionClient,
+    data: {
+      productId: bigint;
+      warehouseId: bigint;
+      quantitySigned: bigint;
+      balanceAfter: bigint;
+      orderId: bigint;
+      orderItemId: bigint;
+      idempotencyKey: string;
+      createdById: bigint;
+    },
+  ): Promise<void> {
+    await tx.stockLedger.create({
+      data: {
+        productId: data.productId,
+        warehouseId: data.warehouseId,
+        changeType: 'SHIPMENT',
+        quantity: data.quantitySigned,
+        balanceAfter: data.balanceAfter,
+        referenceType: 'ORDER_SHIPMENT',
+        referenceId: data.orderId,
+        referenceLineId: data.orderItemId,
+        idempotencyKey: data.idempotencyKey,
+        createdById: data.createdById,
+      },
+    });
+  }
+
   // --- transfers ------------------------------------------------------------
 
   /** Find an existing transfer record by its client idempotency key within a

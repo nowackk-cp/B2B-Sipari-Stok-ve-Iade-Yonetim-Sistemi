@@ -52,6 +52,14 @@ export const AUDIT_ACTIONS = {
   // stock_ledger movement and no on_hand change occur — a reservation only moves
   // `reserved` (INVENTORY_RULES §5, ADR-003, ADR-007).
   ORDER_APPROVED: 'ORDER_APPROVED',
+  // Orders (Order Shipment / Stock Commit Foundation): the APPROVED→SHIPPED
+  // transition. Its business audit row is written inside the SAME transaction as
+  // the order status change AND the physical stock commit (on_hand−− & reserved−−
+  // on each (product, warehouse) balance, each ACTIVE reservation → CONSUMED, and
+  // one append-only SHIPMENT stock_ledger movement per line). The shipment record
+  // and order_status_history append are in that same transaction (ADR-007,
+  // ORDER_RULES §5, INVENTORY_RULES §4/§5).
+  ORDER_SHIPPED: 'ORDER_SHIPPED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

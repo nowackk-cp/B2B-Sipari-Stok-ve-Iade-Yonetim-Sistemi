@@ -59,6 +59,7 @@ export interface OrderRow {
   createdAt: Date;
   updatedAt: Date;
   approvedAt: Date | null;
+  shippedAt: Date | null;
   cancelledAt: Date | null;
   customer: { publicId: string };
   warehouse: { publicId: string };
@@ -71,6 +72,15 @@ export interface ReservationLine {
   orderItemId: bigint;
   productId: bigint;
   quantity: bigint;
+}
+
+/** An immutable order-shipment command record (Order Shipment Foundation). Carries
+ * the order id so an idempotency replay can verify the key belongs to THIS order. */
+export interface ShipmentRow {
+  id: bigint;
+  publicId: string;
+  orderId: bigint;
+  idempotencyKey: string;
 }
 
 /** A computed order line ready to persist (totals already calculated server-side). */
@@ -113,6 +123,7 @@ const ORDER_SELECT = {
   createdAt: true,
   updatedAt: true,
   approvedAt: true,
+  shippedAt: true,
   cancelledAt: true,
   customer: { select: { publicId: true } },
   warehouse: { select: { publicId: true } },
@@ -371,6 +382,18 @@ export class OrderRepository {
     return result.count;
   }
 
+  /** Transition an APPROVED order to SHIPPED with an expected-status conditional
+   * update (status='APPROVED'); sets shipped_at. Returns the number of affected
+   * rows (0 ⇒ a concurrent transition already moved it → caller 409s). Caller's
+   * transaction (ORDER_RULES §1a step 2 / §5). */
+  async shipIfApproved(tx: DbClient, id: bigint, at: Date): Promise<number> {
+    const result = await tx.order.updateMany({
+      where: { id, status: 'APPROVED' },
+      data: { status: 'SHIPPED', shippedAt: at },
+    });
+    return result.count;
+  }
+
   /**
    * Lock and re-read the product rows backing an order's lines FOR SHARE so the
    * caller can revalidate product lifecycle at APPROVE time (ORDER_RULES §"Aktif
@@ -409,6 +432,27 @@ export class OrderRepository {
       FOR SHARE`;
   }
 
+  /**
+   * Lock and re-read the order's warehouse row FOR SHARE so the caller can
+   * revalidate the warehouse lifecycle at SHIP time: a warehouse made inactive or
+   * soft-deleted after approval must block shipment. FOR SHARE (not FOR UPDATE) is
+   * deliberate, exactly as for {@link lockOrderItemProductsForApproval}: a
+   * deactivate/soft-delete is a non-key UPDATE (FOR NO KEY UPDATE) which FOR SHARE
+   * conflicts with, so the lifecycle race is serialised; while a concurrent stock
+   * op holding the (product, warehouse) balance needs only FOR KEY SHARE on the
+   * warehouse FK parent, which FOR SHARE is compatible with — so no deadlock. MUST
+   * run inside the caller's transaction (lock held to commit). */
+  async lockWarehouseForShipment(
+    tx: Prisma.TransactionClient,
+    warehouseId: bigint,
+  ): Promise<{ isActive: boolean; deletedAt: Date | null } | null> {
+    const rows = await tx.$queryRaw<Array<{ isActive: boolean; deletedAt: Date | null }>>`
+      SELECT "is_active" AS "isActive", "deleted_at" AS "deletedAt"
+      FROM "warehouses" WHERE "id" = ${warehouseId}
+      FOR SHARE`;
+    return rows[0] ?? null;
+  }
+
   /** Read an order's lines as reservation inputs (internal order-item + product
    * ids and the quantity), ordered by product id ascending so the caller can lock
    * the (product, warehouse) balances in a deterministic order (ADR-003 §6).
@@ -427,13 +471,70 @@ export class OrderRepository {
     return tx.order.findUniqueOrThrow({ where: { id }, select: ORDER_SELECT });
   }
 
+  // --- shipments (order shipment / stock commit) ----------------------------
+
+  /** Find an existing shipment record by its client idempotency key within a
+   * company (replay lookup — the `(company_id, idempotency_key)` unique). The
+   * carried `orderId` lets the caller distinguish a true same-order replay from a
+   * key reused for a DIFFERENT order (→ 409). */
+  async findShipmentByKey(
+    companyId: bigint,
+    idempotencyKey: string,
+    executor?: DbClient,
+  ): Promise<ShipmentRow | null> {
+    return this.db(executor).orderShipment.findUnique({
+      where: { companyId_idempotencyKey: { companyId, idempotencyKey } },
+      select: { id: true, publicId: true, orderId: true, idempotencyKey: true },
+    });
+  }
+
+  /** Find the (single) shipment record for an order, if any. Used INSIDE the ship
+   * transaction after the order row lock: if a concurrent same-key request already
+   * shipped this order, its committed shipment is read here and a same-key replay
+   * is served instead of a spurious 409. */
+  async findShipmentByOrderId(tx: DbClient, orderId: bigint): Promise<ShipmentRow | null> {
+    return tx.orderShipment.findUnique({
+      where: { orderId },
+      select: { id: true, publicId: true, orderId: true, idempotencyKey: true },
+    });
+  }
+
+  /** Insert one immutable shipment command record. The `(company_id,
+   * idempotency_key)` and `order_id` uniques are the row-level safety nets against
+   * a duplicate shipment; a concurrent same-key/same-order insert raises P2002 and
+   * rolls the whole ship transaction back. Caller's transaction. */
+  async insertShipment(
+    tx: DbClient,
+    data: {
+      companyId: bigint;
+      orderId: bigint;
+      warehouseId: bigint;
+      idempotencyKey: string;
+      createdById: bigint;
+      at: Date;
+    },
+  ): Promise<ShipmentRow> {
+    return tx.orderShipment.create({
+      data: {
+        companyId: data.companyId,
+        orderId: data.orderId,
+        warehouseId: data.warehouseId,
+        status: 'SHIPPED',
+        shippedAt: data.at,
+        idempotencyKey: data.idempotencyKey,
+        createdById: data.createdById,
+      },
+      select: { id: true, publicId: true, orderId: true, idempotencyKey: true },
+    });
+  }
+
   /** Append an immutable order_status_history row (append-only DB trigger). */
   async insertStatusHistory(
     tx: DbClient,
     data: {
       orderId: bigint;
-      fromStatus: 'DRAFT' | 'APPROVED' | 'CANCELLED' | null;
-      toStatus: 'DRAFT' | 'APPROVED' | 'CANCELLED';
+      fromStatus: 'DRAFT' | 'APPROVED' | 'SHIPPED' | 'CANCELLED' | null;
+      toStatus: 'DRAFT' | 'APPROVED' | 'SHIPPED' | 'CANCELLED';
       changedById: bigint;
       reason: string | null;
     },

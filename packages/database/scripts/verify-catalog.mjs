@@ -40,6 +40,9 @@ async function main() {
     // Stock Transfer Foundation: a committed atomic transfer record is write-once
     // (UPDATE/DELETE blocked at the DB level — task rule 15).
     'no_mutation_stock_transfer_records',
+    // Order Shipment Foundation: a committed shipment record is write-once
+    // (UPDATE/DELETE blocked at the DB level).
+    'no_mutation_order_shipments',
   ]) {
     if (!triggerNames.has(name)) fail(`missing append-only trigger: ${name}`);
   }
@@ -192,6 +195,12 @@ async function main() {
     // product.company is a DB invariant).
     'order_items_order_id_company_id_fkey',
     'order_items_product_id_company_id_fkey',
+    // Order Shipment Foundation: the shipment's order/warehouse FKs are likewise
+    // company-pinned composites, so a shipment's order AND warehouse belong to the
+    // shipment's tenant; both must RESTRICT (no silent cascade of a committed
+    // shipment when an order/warehouse is removed).
+    'order_shipments_order_id_company_id_fkey',
+    'order_shipments_warehouse_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }
