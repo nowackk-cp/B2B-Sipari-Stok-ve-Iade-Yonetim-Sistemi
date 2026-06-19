@@ -406,6 +406,43 @@ export class StockRepository {
     });
   }
 
+  // --- returns (return / refund restock) ------------------------------------
+
+  /** Append one immutable RETURN_IN movement to the ledger (quantity POSITIVE), the
+   * physical restock of a returned line. Correlated to its return via
+   * `reference_type='RETURN', reference_id=returnId, reference_line_id=returnItemId`.
+   * The per-line idempotency key (`RETURN_IN:{returnId}:{returnItemId}`) is unique,
+   * so a retried/duplicate approval cannot append a second movement
+   * (INVENTORY_RULES §3a, STK-6). Caller's transaction. */
+  async insertReturnMovement(
+    tx: Prisma.TransactionClient,
+    data: {
+      productId: bigint;
+      warehouseId: bigint;
+      quantity: bigint;
+      balanceAfter: bigint;
+      returnId: bigint;
+      returnItemId: bigint;
+      idempotencyKey: string;
+      createdById: bigint;
+    },
+  ): Promise<void> {
+    await tx.stockLedger.create({
+      data: {
+        productId: data.productId,
+        warehouseId: data.warehouseId,
+        changeType: 'RETURN_IN',
+        quantity: data.quantity,
+        balanceAfter: data.balanceAfter,
+        referenceType: 'RETURN',
+        referenceId: data.returnId,
+        referenceLineId: data.returnItemId,
+        idempotencyKey: data.idempotencyKey,
+        createdById: data.createdById,
+      },
+    });
+  }
+
   // --- transfers ------------------------------------------------------------
 
   /** Find an existing transfer record by its client idempotency key within a

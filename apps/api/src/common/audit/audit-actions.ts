@@ -65,6 +65,15 @@ export const AUDIT_ACTIONS = {
   // header + line snapshot + the gapless invoice_series number allocation
   // (ADR-007, INVOICE_RULES §3, ADR-006).
   INVOICE_ISSUED: 'INVOICE_ISSUED',
+  // Returns (Return/Refund Foundation): a customer return raised against a SHIPPED
+  // order (RETURN_CREATED — no stock effect) and its approval (RETURN_APPROVED).
+  // The RETURN_APPROVED audit row is written inside the SAME transaction as the
+  // return DRAFT→APPROVED transition AND the physical restock (on_hand++ on each
+  // (product, warehouse) balance + one append-only RETURN_IN stock_ledger movement
+  // per line; reserved unchanged). The status-history append is in that same
+  // transaction (ADR-007, RETURN_RULES §3, INVENTORY_RULES §3).
+  RETURN_CREATED: 'RETURN_CREATED',
+  RETURN_APPROVED: 'RETURN_APPROVED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

@@ -146,14 +146,18 @@ describe('transaction integrity — delete prevention & no cascade', () => {
     const ret = await prisma.return.create({
       data: {
         returnNo: `RET_${uniqueSuffix()}`,
+        companyId: company.id,
         orderId: order.id,
         customerId: customer.id,
+        warehouseId: order.warehouseId,
+        idempotencyKey: `rk_${uniqueSuffix()}`,
         createdById: user.id,
       },
     });
     await prisma.returnItem.create({
       data: {
         returnId: ret.id,
+        companyId: company.id,
         orderItemId: orderItem.id,
         productId: product.id,
         quantity: 1n,

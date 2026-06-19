@@ -233,6 +233,9 @@ model Company {
   // The order→company FK RESTRICTs, and the (id, company_id) composite-unique
   // targets pin each order's customer/warehouse/items to the SAME tenant.
   orders        Order[]
+  // Returns (Return/Refund Foundation): customer returns are company-scoped
+  // transaction data, pinned to this tenant by composite FKs.
+  returns       Return[]
   // Authorization cache version (PG-004): the per-company monotonic counter that
   // anchors the effective-permission cache key. Maintained entirely by DB
   // triggers (migration 20260616030000_authorization_cache_version).
@@ -321,6 +324,7 @@ model User {
   transferRecordsCreated StockTransferRecord[]   @relation("StockTransferRecordCreatedBy")
   transferStatusChanges  TransferStatusHistory[] @relation("TransferStatusHistoryChangedBy")
   returnsCreated         Return[]                @relation("ReturnCreatedBy")
+  returnsApproved        Return[]                @relation("ReturnApprovedBy")
   returnStatusChanges    ReturnStatusHistory[]   @relation("ReturnStatusHistoryChangedBy")
   invoicesCreated        Invoice[]               @relation("InvoiceCreatedBy")
   invoiceStatusChanges   InvoiceStatusHistory[]  @relation("InvoiceStatusHistoryChangedBy")
@@ -669,6 +673,7 @@ model Warehouse {
   orders             Order[]
   orderShipments     OrderShipment[]
   invoices           Invoice[]
+  returns            Return[]
 
   // Warehouse code identity is (company, code): the same code may exist across
   // companies. The TASK-012 management migration converts this to a PARTIAL
@@ -1113,47 +1118,107 @@ model CommandIdempotency {
 // M10 Returns
 // ---------------------------------------------------------------------------
 
+/// Customer return / refund record (Return/Refund Foundation).
+///
+/// One return is raised against a SHIPPED (or invoiced — which implies shipped)
+/// order. It is created REQUESTED-equivalent (`DRAFT`) with NO stock effect; on
+/// `DRAFT → APPROVED` the resellable quantity is physically restocked into the
+/// order's source warehouse (`on_hand += qty`, one positive `RETURN_IN`
+/// `stock_ledger` movement per line; `reserved` is untouched). The canonical
+/// state machine's `DRAFT` is the created/“requested” state and `APPROVED` the
+/// restocked state for this foundation (RETURN_RULES; later tasks add RECEIVED/
+/// COMPLETED + credit notes).
+///
+/// Tenant safety is a DB invariant: `company_id` is carried explicitly and the
+/// composite FKs pin order.company = customer.company = warehouse.company = this
+/// company, so a cross-company return is physically un-insertable (not merely
+/// rejected in code). Idempotent per client: `(company_id, idempotency_key)` is
+/// unique for create and `(company_id, approve_idempotency_key)` for approve, so a
+/// same-key replay finds this row and creates no second return/movement. The row
+/// is managed by status transition (a `no_delete_returns` trigger blocks DELETE);
+/// `return_status_history` is append-only.
 model Return {
-  id          BigInt       @id @default(autoincrement())
-  publicId    String       @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
-  returnNo    String       @unique @map("return_no")
-  orderId     BigInt       @map("order_id")
-  customerId  BigInt       @map("customer_id")
-  status      ReturnStatus @default(DRAFT)
-  reason      String?
-  createdById BigInt       @map("created_by")
-  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  receivedAt  DateTime?    @map("received_at") @db.Timestamptz(6)
+  id                    BigInt       @id @default(autoincrement())
+  publicId              String       @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  returnNo              String       @unique @map("return_no")
+  // Owning tenant (NOT NULL). Returns are company-scoped transaction data; every
+  // list/get and mutation is filtered by this company, resolved from the
+  // PostgreSQL principal — never a JWT claim. The composite FKs below pin the
+  // order/customer/warehouse to THIS company at the DB layer.
+  companyId             BigInt       @map("company_id")
+  orderId               BigInt       @map("order_id")
+  customerId            BigInt       @map("customer_id")
+  // Source warehouse the goods physically return to (the order's warehouse —
+  // RETURN_RULES §3); the restock `on_hand += qty` and `RETURN_IN` ledger target it.
+  warehouseId           BigInt       @map("warehouse_id")
+  // Optional link to the order's invoice. Reserved for the future credit-note task
+  // (this foundation creates no credit note); nullable + SET NULL.
+  invoiceId             BigInt?      @map("invoice_id")
+  status                ReturnStatus @default(DRAFT)
+  reason                String?
+  // Client idempotency key for POST /orders/:id/returns (create). A same-key replay
+  // returns the existing return; reuse for a different order/payload is a 409.
+  idempotencyKey        String       @map("idempotency_key")
+  // Client idempotency key for POST /returns/:id/approve. A same-key replay returns
+  // the approved return; reuse for a different return is a 409. NULL until approved.
+  approveIdempotencyKey String?      @map("approve_idempotency_key")
+  createdById           BigInt       @map("created_by")
+  approvedById          BigInt?      @map("approved_by")
+  createdAt             DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  approvedAt            DateTime?    @map("approved_at") @db.Timestamptz(6)
+  receivedAt            DateTime?    @map("received_at") @db.Timestamptz(6)
 
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  createdBy User     @relation("ReturnCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  company    Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  order      Order     @relation(fields: [orderId, companyId], references: [id, companyId], onDelete: Restrict)
+  customer   Customer  @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Restrict)
+  warehouse  Warehouse @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoice    Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  createdBy  User      @relation("ReturnCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy User?     @relation("ReturnApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
 
   items         ReturnItem[]
   statusHistory ReturnStatusHistory[]
 
+  // Client idempotency replay: at most one return per (company, create key) and one
+  // approve per (company, approve key). NULL approve keys coexist (NULLS DISTINCT).
+  @@unique([companyId, idempotencyKey])
+  @@unique([companyId, approveIdempotencyKey])
+  // Composite-FK target so return_items.(return_id, company_id) pins each line to
+  // the return's own tenant.
+  @@unique([id, companyId])
   @@index([orderId])
   @@index([status])
+  @@index([companyId])
+  @@index([warehouseId])
+  @@index([invoiceId])
   @@map("returns")
 }
 
 model ReturnItem {
   id          BigInt          @id @default(autoincrement())
   returnId    BigInt          @map("return_id")
+  // Owning tenant (NOT NULL) — equal to the parent return's company. The composite
+  // FKs below pin this line's return AND product to this same company, so
+  // return.company = product.company is a DB invariant.
+  companyId   BigInt          @map("company_id")
   orderItemId BigInt          @map("order_item_id")
   productId   BigInt          @map("product_id")
   quantity    BigInt
   condition   ReturnCondition
   restock     Boolean         @default(false)
+  reason      String?
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  return    Return    @relation(fields: [returnId], references: [id], onDelete: Restrict)
+  // The return FK is the company-pinned composite; its constraint name is kept as
+  // `return_items_return_id_fkey` (verify-catalog asserts that name stays RESTRICT).
+  return    Return    @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Restrict, map: "return_items_return_id_fkey")
   orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
-  product   Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  product   Product   @relation(fields: [productId, companyId], references: [id, companyId], onDelete: Restrict)
 
   @@index([returnId])
   @@index([orderItemId])
+  @@index([companyId])
   @@map("return_items")
 }
 
@@ -1242,6 +1307,7 @@ model Invoice {
   items         InvoiceItem[]
   payments      Payment[]
   statusHistory InvoiceStatusHistory[]
+  returns       Return[]
 
   // A-01: gapless invoice numbering uniqueness. NULL invoice_number rows
   // (DRAFT) do not collide under PostgreSQL NULLS DISTINCT semantics.

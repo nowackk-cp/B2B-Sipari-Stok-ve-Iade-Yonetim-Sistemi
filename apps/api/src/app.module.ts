@@ -21,6 +21,7 @@ import { InventoryModule } from './modules/inventory/inventory.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
+import { ReturnsModule } from './modules/returns/returns.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { InvoicesModule } from './modules/invoices/invoices.module';
     CustomersModule,
     OrdersModule,
     InvoicesModule,
+    ReturnsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

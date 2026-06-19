@@ -545,6 +545,36 @@ export class OrdersService {
     return this.repo.lockOrderForUpdate(tx, orderId);
   }
 
+  // --- cross-module read API (returns) --------------------------------------
+
+  /**
+   * Project an order in `companyId` as a return snapshot, or null if it does not
+   * exist in that tenant (Return/Refund Foundation). The returns module calls this
+   * instead of reading the orders tables directly — orders owns those tables
+   * (MODULE_BOUNDARIES §2/§5). Read-only; no scope/permission decision is made here
+   * (the caller enforces return permission + warehouse scope). The projection
+   * carries each line's order-item id, product and the SHIPPED quantity
+   * (`order_items.quantity`) the return-eligible amount is computed against.
+   */
+  getReturnableOrder(companyId: bigint, publicId: string): Promise<InvoiceableOrder | null> {
+    return this.repo.findInvoiceableByPublicId(companyId, publicId);
+  }
+
+  /**
+   * Lock an order row FOR UPDATE inside the CALLER's transaction and return its
+   * current status (Return/Refund Foundation). The return approve transaction calls
+   * this to serialise the shipped-vs-returned accounting against any concurrent
+   * order transition / sibling return approval before restocking. Orders owns the
+   * row lock on its own table; it never opens a new transaction here — the returns
+   * service passes its `tx` down (MODULE_BOUNDARIES §3.1).
+   */
+  lockOrderForReturn(
+    tx: Prisma.TransactionClient,
+    orderId: bigint,
+  ): Promise<{ status: string } | null> {
+    return this.repo.lockOrderForUpdate(tx, orderId);
+  }
+
   // --- internals ------------------------------------------------------------
 
   /** Resolve an order in the actor's company or 404 (also hides another tenant's

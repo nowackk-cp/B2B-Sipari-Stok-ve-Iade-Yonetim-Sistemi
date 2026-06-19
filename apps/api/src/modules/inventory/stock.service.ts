@@ -232,6 +232,56 @@ export class StockService {
     }
   }
 
+  /**
+   * Restock a return's resellable lines, INSIDE the caller's transaction (returns →
+   * inventory; MODULE_BOUNDARIES §3.1 — the returns module never writes stock tables
+   * directly). The caller (ReturnsService) owns the transaction, the return row lock
+   * and the DRAFT→APPROVED transition; this method only touches inventory-owned
+   * tables (`stock_balances`, `stock_ledger`).
+   *
+   * For EVERY line, in a deterministic product-id order (RETURN_RULES §3 /
+   * INVENTORY_RULES §5 — a return targets a single warehouse, and a return's lines
+   * map to DISTINCT order lines = distinct products, so ordering by product id is a
+   * total, deadlock-safe lock order), it locks the (product, warehouse) balance FOR
+   * UPDATE, increases `on_hand += quantity` and appends one positive `RETURN_IN`
+   * `stock_ledger` movement (keyed `RETURN_IN:{returnId}:{returnItemId}` so a retry
+   * can never duplicate it). `reserved` is NEVER touched — a return is a direct
+   * on_hand increase, not a reservation (RETURN_RULES §3). A return only ever
+   * increases on_hand, so there is no shortfall/availability check; the whole
+   * approval is all-or-nothing via the surrounding transaction.
+   */
+  async receiveReturn(
+    tx: Prisma.TransactionClient,
+    params: {
+      returnId: bigint;
+      warehouseId: bigint;
+      createdById: bigint;
+      items: ReadonlyArray<{ returnItemId: bigint; productId: bigint; quantity: bigint }>;
+    },
+  ): Promise<void> {
+    // Deterministic lock order (product id ascending; warehouse is constant for a
+    // return) — prevents deadlocks against concurrent stock ops on the same rows.
+    const items = [...params.items].sort((a, b) =>
+      a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0,
+    );
+
+    for (const item of items) {
+      const before = await this.repo.lockBalanceOnHand(tx, item.productId, params.warehouseId);
+      const after = before + item.quantity;
+      await this.repo.setBalanceOnHand(tx, item.productId, params.warehouseId, after);
+      await this.repo.insertReturnMovement(tx, {
+        productId: item.productId,
+        warehouseId: params.warehouseId,
+        quantity: item.quantity,
+        balanceAfter: after,
+        returnId: params.returnId,
+        returnItemId: item.returnItemId,
+        idempotencyKey: `RETURN_IN:${params.returnId.toString()}:${item.returnItemId.toString()}`,
+        createdById: params.createdById,
+      });
+    }
+  }
+
   // --- command --------------------------------------------------------------
 
   async adjust(
