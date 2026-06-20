@@ -489,6 +489,31 @@ export class OrderRepository {
     return rows[0] ?? null;
   }
 
+  /**
+   * Lock and re-read the warehouse row FOR SHARE so the caller can revalidate the
+   * warehouse lifecycle at return-APPROVE time (Return/Refund Foundation): a
+   * warehouse made inactive or soft-deleted after the pre-transaction scope check
+   * must block the restock. Carries `company_id` too so the caller can re-assert the
+   * tenant under the lock. The FOR SHARE choice is deliberate and identical to
+   * {@link lockWarehouseForShipment}: a deactivate/soft-delete is a non-key UPDATE
+   * (FOR NO KEY UPDATE) which FOR SHARE conflicts with, so the lifecycle race is
+   * serialised; while a concurrent stock op holding the (product, warehouse) balance
+   * needs only FOR KEY SHARE on the warehouse FK parent, which FOR SHARE is
+   * compatible with — so the restock's own balance writes never deadlock against this
+   * lock. MUST run inside the caller's transaction (lock held to commit). */
+  async lockWarehouseForReturn(
+    tx: Prisma.TransactionClient,
+    warehouseId: bigint,
+  ): Promise<{ companyId: bigint; isActive: boolean; deletedAt: Date | null } | null> {
+    const rows = await tx.$queryRaw<
+      Array<{ companyId: bigint; isActive: boolean; deletedAt: Date | null }>
+    >`
+      SELECT "company_id" AS "companyId", "is_active" AS "isActive", "deleted_at" AS "deletedAt"
+      FROM "warehouses" WHERE "id" = ${warehouseId}
+      FOR SHARE`;
+    return rows[0] ?? null;
+  }
+
   /** Read an order's lines as reservation inputs (internal order-item + product
    * ids and the quantity), ordered by product id ascending so the caller can lock
    * the (product, warehouse) balances in a deterministic order (ADR-003 §6).

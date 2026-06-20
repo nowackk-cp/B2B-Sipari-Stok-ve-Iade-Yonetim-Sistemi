@@ -575,6 +575,23 @@ export class OrdersService {
     return this.repo.lockOrderForUpdate(tx, orderId);
   }
 
+  /**
+   * Lock the order's warehouse row FOR SHARE inside the CALLER's transaction and
+   * return its tenant + lifecycle flags (Return/Refund Foundation). The return
+   * approve transaction calls this to revalidate the warehouse (still same-tenant,
+   * active, non-deleted) under a row lock BEFORE it restocks — so a warehouse
+   * deactivated/soft-deleted after the pre-transaction scope check is serialised and
+   * cannot be restocked into. Orders owns the row lock; it never opens a new
+   * transaction here — the returns service passes its `tx` down (MODULE_BOUNDARIES
+   * §3.1). Returns null only if the warehouse row vanished.
+   */
+  lockWarehouseForReturn(
+    tx: Prisma.TransactionClient,
+    warehouseId: bigint,
+  ): Promise<{ companyId: bigint; isActive: boolean; deletedAt: Date | null } | null> {
+    return this.repo.lockWarehouseForReturn(tx, warehouseId);
+  }
+
   // --- internals ------------------------------------------------------------
 
   /** Resolve an order in the actor's company or 404 (also hides another tenant's

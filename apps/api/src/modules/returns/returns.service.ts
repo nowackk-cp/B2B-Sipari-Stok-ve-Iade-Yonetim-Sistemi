@@ -6,6 +6,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '@b2b/database';
 import type { ReturnListView, ReturnView } from '@b2b/contracts';
@@ -281,6 +282,16 @@ export class ReturnsService {
             throw new ConflictException('Return quantity exceeds the returnable quantity');
           }
         }
+        // (3b) Revalidate the warehouse lifecycle UNDER a row lock BEFORE any restock:
+        //      the pre-transaction scope check resolves only ACTIVE warehouses, but a
+        //      warehouse made inactive/soft-deleted AFTER that check (while this approve
+        //      waited on the order/return lock) must still block the restock. The
+        //      FOR SHARE lock serialises against a concurrent deactivate/soft-delete —
+        //      if that commits first the row is read inactive/deleted here and approve
+        //      fails (422); if approve locks first, the deactivate waits until commit
+        //      and the restock is into a still-active warehouse. Runs before the balance
+        //      update and the ledger insert (task rule 9).
+        await this.assertWarehouseStillActive(tx, ret.warehouseId, actor.companyId);
         // (4) Restock: lock each (product, warehouse) balance FOR UPDATE in
         //     deterministic product-id order, on_hand += qty, one positive RETURN_IN
         //     ledger movement per line (reserved untouched). A duplicate movement is
@@ -470,6 +481,35 @@ export class ReturnsService {
       permission,
     );
     if (!decision.allowed) throw new ForbiddenException('Out of warehouse scope');
+  }
+
+  /**
+   * Re-validate at APPROVE time that the return's warehouse is still operable: a
+   * same-tenant, ACTIVE (`is_active = true`), non-soft-deleted (`deleted_at IS NULL`)
+   * row. Runs inside the approve transaction, locking the warehouse row FOR SHARE
+   * (see {@link OrdersService.lockWarehouseForReturn}) so a concurrent deactivate/
+   * soft-delete is serialised. A stale (missing/cross-company/inactive/deleted)
+   * warehouse throws 422 BUSINESS_RULE, rolling the whole transaction back so the
+   * return stays DRAFT with no restock/ledger — distinct from the 409 used for status
+   * conflicts and the pre-transaction 403 used when the warehouse is ALREADY inactive
+   * before approve starts (the scope service resolves only ACTIVE warehouses). This
+   * mirrors the order-shipment warehouse revalidation exactly. */
+  private async assertWarehouseStillActive(
+    tx: Prisma.TransactionClient,
+    warehouseId: bigint,
+    companyId: bigint,
+  ): Promise<void> {
+    const warehouse = await this.orders.lockWarehouseForReturn(tx, warehouseId);
+    if (
+      !warehouse ||
+      warehouse.companyId !== companyId ||
+      !warehouse.isActive ||
+      warehouse.deletedAt !== null
+    ) {
+      throw new UnprocessableEntityException(
+        'The return warehouse is no longer active and cannot be approved',
+      );
+    }
   }
 
   /** A human-facing, collision-resistant return number: `RET-YYYYMMDD-<10 hex>`.

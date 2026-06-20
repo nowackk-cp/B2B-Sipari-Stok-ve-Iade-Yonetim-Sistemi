@@ -226,6 +226,82 @@ async function returnInternalId(ctx: TestApp, publicId: string): Promise<bigint>
   return r.id;
 }
 
+async function orderInternalId(ctx: TestApp, publicId: string): Promise<bigint> {
+  const o = await ctx.prisma.order.findUniqueOrThrow({
+    where: { publicId },
+    select: { id: true },
+  });
+  return o.id;
+}
+
+/** Poll until at least one backend query is BLOCKED waiting on a lock (the test DB
+ * is isolated, so the only such waiter is the approve request we just fired blocking
+ * on the held order row lock). */
+async function waitForLockWaiter(ctx: TestApp, timeoutMs = 10000): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const rows = await ctx.prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND state = 'active'`;
+    if (Number(rows[0]!.n) >= 1) return;
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('timed out waiting for the approve request to block on the order lock');
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/**
+ * Deterministically drive the warehouse-lifecycle-vs-approve race. Holds the order
+ * row FOR UPDATE in a side transaction so the approve blocks INSIDE its transaction
+ * — AFTER its pre-transaction warehouse-scope check (which still sees the warehouse
+ * active) but BEFORE the in-transaction FOR SHARE warehouse revalidation. While it is
+ * blocked, `whileBlocked` mutates the warehouse; the lock is then released and the
+ * approve response returned. This pins the exact ordering the race net must cover.
+ */
+async function approveBlockedOnOrderLock(
+  ctx: TestApp,
+  f: Fixture,
+  orderId: bigint,
+  returnPublicId: string,
+  whileBlocked: () => Promise<void>,
+): Promise<request.Response> {
+  let release!: () => void;
+  const released = new Promise<void>((r) => {
+    release = r;
+  });
+  let held!: () => void;
+  const heldP = new Promise<void>((r) => {
+    held = r;
+  });
+  const holder = ctx.prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId} FOR UPDATE`;
+      held();
+      await released;
+    },
+    { timeout: 20000, maxWait: 20000 },
+  );
+  try {
+    await heldP;
+    // `.then(...)` dispatches the supertest request NOW (a bare Test is lazy and
+    // would not fire until awaited), so it actually races against the held lock.
+    const approve: Promise<request.Response> = approveReturn(
+      ctx,
+      f.actor.token,
+      returnPublicId,
+      freshKey(),
+    ).then((r) => r);
+    await waitForLockWaiter(ctx);
+    await whileBlocked();
+    release();
+    const [res] = await Promise.all([approve, holder]);
+    return res;
+  } finally {
+    release(); // ensure the holder always commits, even on assertion failure
+  }
+}
+
 describe('Return / refund foundation (integration, real PostgreSQL)', () => {
   let ctx: TestApp;
 
@@ -866,6 +942,177 @@ describe('Return / refund foundation (integration, real PostgreSQL)', () => {
         where: { referenceType: 'RETURN', referenceId: retId },
       }),
     ).toBe(0);
+  });
+
+  it('28b. a soft-deleted warehouse fails approve and leaves no restock', async () => {
+    const f = await fixture(ctx);
+    const { orderId, lines } = await shippedOrder(ctx, f, [{ quantity: '2', onHand: 100n }]);
+    const line = lines[0]!;
+    const created = await raiseReturn(
+      ctx,
+      f.actor.token,
+      orderId,
+      { items: [{ productId: line.productPublicId, quantity: '1' }] },
+      freshKey(),
+    ).expect(201);
+    // Soft-delete the warehouse after the return is raised. The scope service resolves
+    // only non-deleted warehouses, so the pre-transaction check denies (403); the
+    // in-transaction revalidation is the race net behind it.
+    await ctx.prisma.warehouse.update({
+      where: { id: f.warehouse.id },
+      data: { deletedAt: new Date() },
+    });
+    await approveReturn(ctx, f.actor.token, created.body.id, freshKey()).expect(403);
+    expect((await balanceOf(ctx, line.productId, f.warehouse.id)).onHand).toBe(98n); // unchanged
+    const retId = await returnInternalId(ctx, created.body.id);
+    expect(
+      await ctx.prisma.stockLedger.count({
+        where: { referenceType: 'RETURN', referenceId: retId },
+      }),
+    ).toBe(0);
+  });
+
+  it('28c. RACE: warehouse deactivated while approve waits on the order lock → 422, nothing committed', async () => {
+    const f = await fixture(ctx);
+    const { orderId, lines } = await shippedOrder(ctx, f, [{ quantity: '2', onHand: 100n }]);
+    const line = lines[0]!;
+    const created = await raiseReturn(
+      ctx,
+      f.actor.token,
+      orderId,
+      { items: [{ productId: line.productPublicId, quantity: '1' }] },
+      freshKey(),
+    ).expect(201);
+    const oid = await orderInternalId(ctx, orderId);
+
+    const res = await approveBlockedOnOrderLock(ctx, f, oid, created.body.id, async () => {
+      // Flip the warehouse inactive AFTER approve passed its pre-transaction scope
+      // check (warehouse was active then) but BEFORE it locks/revalidates it.
+      await ctx.prisma.$executeRaw`
+        UPDATE "warehouses" SET "is_active" = false WHERE "id" = ${f.warehouse.id}`;
+    });
+    // The in-transaction FOR SHARE revalidation rejects: 422 BUSINESS_RULE.
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('BUSINESS_RULE');
+
+    // Nothing committed: return stays DRAFT, balance untouched, no ledger, no audit.
+    const retId = await returnInternalId(ctx, created.body.id);
+    const row = await ctx.prisma.return.findUniqueOrThrow({
+      where: { id: retId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('DRAFT');
+    const bal = await balanceOf(ctx, line.productId, f.warehouse.id);
+    expect(bal.onHand).toBe(98n); // unchanged
+    expect(bal.reserved).toBe(0n); // unchanged
+    expect(
+      await ctx.prisma.stockLedger.count({
+        where: { referenceType: 'RETURN', referenceId: retId },
+      }),
+    ).toBe(0);
+    expect(
+      await ctx.prisma.auditLog.count({ where: { action: 'RETURN_APPROVED', entityId: retId } }),
+    ).toBe(0);
+  });
+
+  it('28d. RACE: warehouse soft-deleted while approve waits on the order lock → 422, nothing committed', async () => {
+    const f = await fixture(ctx);
+    const { orderId, lines } = await shippedOrder(ctx, f, [{ quantity: '2', onHand: 100n }]);
+    const line = lines[0]!;
+    const created = await raiseReturn(
+      ctx,
+      f.actor.token,
+      orderId,
+      { items: [{ productId: line.productPublicId, quantity: '1' }] },
+      freshKey(),
+    ).expect(201);
+    const oid = await orderInternalId(ctx, orderId);
+
+    const res = await approveBlockedOnOrderLock(ctx, f, oid, created.body.id, async () => {
+      await ctx.prisma.$executeRaw`
+        UPDATE "warehouses" SET "deleted_at" = now() WHERE "id" = ${f.warehouse.id}`;
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('BUSINESS_RULE');
+
+    const retId = await returnInternalId(ctx, created.body.id);
+    expect((await balanceOf(ctx, line.productId, f.warehouse.id)).onHand).toBe(98n);
+    expect(
+      await ctx.prisma.stockLedger.count({
+        where: { referenceType: 'RETURN', referenceId: retId },
+      }),
+    ).toBe(0);
+  });
+
+  it('28e. RACE: multi-item approve — warehouse deactivated mid-flight commits NO line (422)', async () => {
+    const f = await fixture(ctx);
+    const { orderId, lines } = await shippedOrder(ctx, f, [
+      { quantity: '2', onHand: 100n },
+      { quantity: '3', onHand: 50n },
+    ]);
+    const created = await raiseReturn(
+      ctx,
+      f.actor.token,
+      orderId,
+      {
+        items: [
+          { productId: lines[0]!.productPublicId, quantity: '1' },
+          { productId: lines[1]!.productPublicId, quantity: '2' },
+        ],
+      },
+      freshKey(),
+    ).expect(201);
+    const oid = await orderInternalId(ctx, orderId);
+
+    const res = await approveBlockedOnOrderLock(ctx, f, oid, created.body.id, async () => {
+      await ctx.prisma.$executeRaw`
+        UPDATE "warehouses" SET "is_active" = false WHERE "id" = ${f.warehouse.id}`;
+    });
+    expect(res.status).toBe(422);
+    // Neither line restocked (both still at post-ship on_hand), no ledger, still DRAFT.
+    expect((await balanceOf(ctx, lines[0]!.productId, f.warehouse.id)).onHand).toBe(98n);
+    expect((await balanceOf(ctx, lines[1]!.productId, f.warehouse.id)).onHand).toBe(47n);
+    const retId = await returnInternalId(ctx, created.body.id);
+    expect(
+      await ctx.prisma.stockLedger.count({
+        where: { referenceType: 'RETURN', referenceId: retId },
+      }),
+    ).toBe(0);
+    const row = await ctx.prisma.return.findUniqueOrThrow({
+      where: { id: retId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('DRAFT');
+  });
+
+  it('28f. RACE: approve WINS (warehouse stays active until commit) → restock succeeds, consistent', async () => {
+    const f = await fixture(ctx);
+    const { orderId, lines } = await shippedOrder(ctx, f, [{ quantity: '2', onHand: 100n }]);
+    const line = lines[0]!;
+    const created = await raiseReturn(
+      ctx,
+      f.actor.token,
+      orderId,
+      { items: [{ productId: line.productPublicId, quantity: '1' }] },
+      freshKey(),
+    ).expect(201);
+    const oid = await orderInternalId(ctx, orderId);
+
+    // The approve blocks on the order lock but the warehouse is NOT touched while it
+    // waits — approve wins the race and restocks into the (still active) warehouse.
+    const res = await approveBlockedOnOrderLock(ctx, f, oid, created.body.id, async () => {
+      /* no warehouse mutation: approve is the winner */
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('APPROVED');
+    const bal = await balanceOf(ctx, line.productId, f.warehouse.id);
+    expect(bal.onHand).toBe(99n); // 98 + 1 restocked
+    const retId = await returnInternalId(ctx, created.body.id);
+    expect(
+      await ctx.prisma.stockLedger.count({
+        where: { referenceType: 'RETURN', referenceId: retId, changeType: 'RETURN_IN' },
+      }),
+    ).toBe(1);
   });
 
   // --- list + detail scope --------------------------------------------------
