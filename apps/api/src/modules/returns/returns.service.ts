@@ -38,6 +38,30 @@ interface ResolvedReturnLine extends ReturnItemWriteData {
   shipped: bigint;
 }
 
+/** One returned line projected for credit-note issuance: the internal ids billing
+ * needs to bind each credit-note line back to its return/order line + product. */
+export interface CreditNotableReturnItem {
+  returnItemId: bigint;
+  orderItemId: bigint;
+  productId: bigint;
+  productPublicId: string;
+  quantity: bigint;
+}
+
+/** A snapshot of a return for credit-note issuance (Return Invoice / Credit Note
+ * Foundation). Read through the returns service so billing never touches the returns
+ * tables directly (MODULE_BOUNDARIES §5). The customer/warehouse internal ids and the
+ * line price+VAT snapshot come from the order projection (OrdersService). */
+export interface CreditNotableReturn {
+  id: bigint;
+  publicId: string;
+  status: string;
+  orderId: bigint;
+  orderPublicId: string;
+  warehouseId: bigint;
+  items: CreditNotableReturnItem[];
+}
+
 /**
  * Return / Refund application service (Return/Refund Foundation).
  *
@@ -374,6 +398,55 @@ export class ReturnsService {
     if (!ret) throw new NotFoundException('Return not found');
     await this.assertObjectScope(actor, ret.warehouseId);
     return toReturnView(ret);
+  }
+
+  // --- cross-module read API (billing / credit notes) -----------------------
+
+  /**
+   * Project a return in `companyId` as a credit-note snapshot, or null if it does
+   * not exist in that tenant (Return Invoice / Credit Note Foundation). The billing
+   * module calls this instead of reading the returns tables directly — returns owns
+   * those tables (MODULE_BOUNDARIES §2/§5). Read-only; no scope/permission decision
+   * is made here (the caller enforces credit-note permission + warehouse scope). The
+   * projection carries each line's return-item id, order-item id, product and the
+   * returned quantity the credit amount is computed against.
+   */
+  async getCreditNotableReturn(
+    companyId: bigint,
+    publicId: string,
+  ): Promise<CreditNotableReturn | null> {
+    const ret = await this.repo.findByPublicId(companyId, publicId);
+    if (!ret) return null;
+    return {
+      id: ret.id,
+      publicId: ret.publicId,
+      status: ret.status,
+      orderId: ret.orderId,
+      orderPublicId: ret.order.publicId,
+      warehouseId: ret.warehouseId,
+      items: ret.items.map((i) => ({
+        returnItemId: i.id,
+        orderItemId: i.orderItemId,
+        productId: i.productId,
+        productPublicId: i.product.publicId,
+        quantity: i.quantity,
+      })),
+    };
+  }
+
+  /**
+   * Lock a return row FOR UPDATE inside the CALLER's transaction and return its
+   * current status (Return Invoice / Credit Note Foundation). The credit-note issue
+   * transaction calls this to re-assert `APPROVED` under the row lock and serialise
+   * against a concurrent same-return credit note before allocating a number. Returns
+   * owns the row lock on its own table; it never opens a new transaction here — the
+   * billing service passes its `tx` down (MODULE_BOUNDARIES §3.1).
+   */
+  lockReturnForCreditNote(
+    tx: Prisma.TransactionClient,
+    returnId: bigint,
+  ): Promise<{ status: string } | null> {
+    return this.repo.lockReturnForUpdate(tx, returnId);
   }
 
   // --- internals ------------------------------------------------------------

@@ -17,6 +17,10 @@ export const ALLOWED_DRIFT_STATEMENTS = [
   // unique (`WHERE order_id IS NOT NULL AND status <> 'VOID'`); the datamodel has
   // no predicate so the diff reports the plain unique as "to be added".
   'CREATE UNIQUE INDEX "invoices_company_id_order_id_active_key" ON "invoices"("company_id", "order_id")',
+  // Credit Note Foundation: the active-credit-note-per-return unique is a PARTIAL
+  // unique (`WHERE status <> 'VOID'`); the datamodel has no predicate so the diff
+  // reports the plain unique as "to be added".
+  'CREATE UNIQUE INDEX "credit_notes_company_id_return_id_active_key" ON "credit_notes"("company_id", "return_id")',
 ];
 
 export function normalize(sql) {

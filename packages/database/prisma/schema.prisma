@@ -212,6 +212,7 @@ model Company {
 
   invoiceSeries InvoiceSeries[]
   invoices      Invoice[]
+  creditNotes   CreditNote[]
   importJobs    ImportJob[]
   // RBAC tenancy (TASK-010b): users and roles are company-scoped. No role is
   // global/assignable without a company — tenant isolation is a DB invariant.
@@ -328,6 +329,7 @@ model User {
   returnStatusChanges    ReturnStatusHistory[]   @relation("ReturnStatusHistoryChangedBy")
   invoicesCreated        Invoice[]               @relation("InvoiceCreatedBy")
   invoiceStatusChanges   InvoiceStatusHistory[]  @relation("InvoiceStatusHistoryChangedBy")
+  creditNotesCreated     CreditNote[]            @relation("CreditNoteCreatedBy")
   quotesCreated          Quote[]                 @relation("QuoteCreatedBy")
   paymentsRecorded       Payment[]               @relation("PaymentCreatedBy")
   filesUploaded          File[]                  @relation("FileUploadedBy")
@@ -619,6 +621,7 @@ model Product {
   transferRecords    StockTransferRecord[]
   returnItems        ReturnItem[]
   invoiceItems       InvoiceItem[]
+  creditNoteItems    CreditNoteItem[]
   quoteItems         QuoteItem[]
 
   // SKU identity is (company, sku): the same SKU may exist across companies.
@@ -674,6 +677,7 @@ model Warehouse {
   orderShipments     OrderShipment[]
   invoices           Invoice[]
   returns            Return[]
+  creditNotes        CreditNote[]
 
   // Warehouse code identity is (company, code): the same code may exist across
   // companies. The TASK-012 management migration converts this to a PARTIAL
@@ -883,12 +887,13 @@ model Customer {
   updatedAt DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
 
-  company   Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  addresses CustomerAddress[]
-  orders    Order[]
-  returns   Return[]
-  invoices  Invoice[]
-  quotes    Quote[]
+  company     Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  addresses   CustomerAddress[]
+  orders      Order[]
+  returns     Return[]
+  invoices    Invoice[]
+  creditNotes CreditNote[]
+  quotes      Quote[]
 
   // Customer code identity is (company, code): the same code may exist across
   // companies. The Customer Management Foundation migration converts this to a
@@ -973,6 +978,7 @@ model Order {
   shipments      OrderShipment[]
   invoices       Invoice[]
   returns        Return[]
+  creditNotes    CreditNote[]
 
   // Composite-FK target so order_items.(order_id, company_id) references it and
   // pins every line to the order's own tenant.
@@ -1179,6 +1185,7 @@ model Return {
 
   items         ReturnItem[]
   statusHistory ReturnStatusHistory[]
+  creditNotes   CreditNote[]
 
   // Client idempotency replay: at most one return per (company, create key) and one
   // approve per (company, approve key). NULL approve keys coexist (NULLS DISTINCT).
@@ -1253,8 +1260,9 @@ model InvoiceSeries {
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  invoices Invoice[]
+  company     Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  invoices    Invoice[]
+  creditNotes CreditNote[]
 
   @@unique([companyId, seriesCode, fiscalYear])
   @@map("invoice_series")
@@ -1308,6 +1316,7 @@ model Invoice {
   payments      Payment[]
   statusHistory InvoiceStatusHistory[]
   returns       Return[]
+  creditNotes   CreditNote[]           @relation("CreditNoteOriginalInvoice")
 
   // A-01: gapless invoice numbering uniqueness. NULL invoice_number rows
   // (DRAFT) do not collide under PostgreSQL NULLS DISTINCT semantics.
@@ -1429,6 +1438,122 @@ model Payment {
 
   @@index([invoiceId])
   @@map("payments")
+}
+
+/// Credit note / refund invoice (Return Invoice / Credit Note Foundation).
+///
+/// One financial credit document issued for an APPROVED return of an invoiced
+/// order (`POST /returns/:id/credit-note`). It is created directly as `ISSUED`
+/// with a gapless number allocated from a dedicated `invoice_series` row
+/// (`series_code = 'CRN'`, ADR-006 — a transaction-locked counter, NOT a
+/// PostgreSQL sequence, so a rollback never burns a number). Amounts are computed
+/// SERVER-SIDE from the return quantities and the original order/invoice line
+/// price+VAT snapshot (never the client). It lives in a DEDICATED table rather than
+/// `invoices`, so the invoice active-order uniqueness/behaviour stays untouched
+/// (the existing invoices_company_id_order_id_active_key partial unique would
+/// otherwise collide for a credit note that carries the same order_id).
+///
+/// Tenant safety is a DB invariant: company_id is carried explicitly and the
+/// return/order/customer/warehouse composite FKs pin every endpoint to this
+/// company, so a cross-company credit note is physically un-insertable. Idempotent
+/// per client: (company_id, idempotency_key) is unique, and a PARTIAL unique
+/// (company_id, return_id) WHERE status <> 'VOID' blocks a duplicate active credit
+/// note per return. The number uniqueness is (company_id, series_id, fiscal_year,
+/// credit_note_number). Never deleted (no_delete_credit_notes trigger).
+model CreditNote {
+  id                BigInt        @id @default(autoincrement())
+  publicId          String        @unique @default(dbgenerated("gen_random_uuid()")) @map("public_id") @db.Uuid
+  companyId         BigInt        @map("company_id")
+  seriesId          BigInt        @map("series_id")
+  creditNoteNumber  BigInt        @map("credit_note_number")
+  creditNoteNo      String        @map("credit_note_no")
+  fiscalYear        Int           @map("fiscal_year")
+  returnId          BigInt        @map("return_id")
+  orderId           BigInt        @map("order_id")
+  // The original invoice the credit reverses. Required — a credit note is never
+  // issued for an un-invoiced order (RETURN_RULES §4); RESTRICT (invoices are
+  // immutable and never deleted).
+  originalInvoiceId BigInt        @map("original_invoice_id")
+  customerId        BigInt        @map("customer_id")
+  warehouseId       BigInt        @map("warehouse_id")
+  status            InvoiceStatus @default(ISSUED)
+  currency          String        @default("TRY") @db.Char(3)
+  subtotalAmount    BigInt        @default(0) @map("subtotal_amount")
+  taxAmount         BigInt        @default(0) @map("tax_amount")
+  grandTotalAmount  BigInt        @default(0) @map("grand_total_amount")
+  // Client idempotency key for POST /returns/:id/credit-note. A same-key replay
+  // returns the existing credit note; reuse for a different return/payload is a 409.
+  idempotencyKey    String        @map("idempotency_key")
+  issuedAt          DateTime      @map("issued_at") @db.Timestamptz(6)
+  createdById       BigInt        @map("created_by_user_id")
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // Composite FKs pin every endpoint to THIS company. onDelete: Restrict — a
+  // return/order/customer/warehouse/invoice that still owns a credit note cannot
+  // be hard-deleted.
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  series          InvoiceSeries @relation(fields: [seriesId], references: [id], onDelete: Restrict)
+  return          Return        @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Restrict)
+  order           Order         @relation(fields: [orderId, companyId], references: [id, companyId], onDelete: Restrict)
+  originalInvoice Invoice       @relation("CreditNoteOriginalInvoice", fields: [originalInvoiceId], references: [id], onDelete: Restrict)
+  customer        Customer      @relation(fields: [customerId, companyId], references: [id, companyId], onDelete: Restrict)
+  warehouse       Warehouse     @relation(fields: [warehouseId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdBy       User          @relation("CreditNoteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  items CreditNoteItem[]
+
+  // Client idempotency replay: at most one credit note per (company, key).
+  @@unique([companyId, idempotencyKey])
+  // Gapless number uniqueness within a series (A-01 / ADR-006).
+  @@unique([companyId, seriesId, fiscalYear, creditNoteNumber])
+  // At most one ACTIVE (non-VOID) credit note per (company, return). The migration
+  // converts this to a PARTIAL unique (`WHERE status <> 'VOID'`), preserving the
+  // index NAME; the diff residue is allowlisted (drift-eval.mjs) and the predicate
+  // is asserted by verify-catalog.mjs.
+  @@unique([companyId, returnId], map: "credit_notes_company_id_return_id_active_key")
+  // Composite-FK target so credit_note_items.(credit_note_id, company_id) pins each
+  // line to the credit note's own tenant.
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([returnId])
+  @@index([orderId])
+  @@index([originalInvoiceId])
+  @@index([customerId])
+  @@index([warehouseId])
+  @@map("credit_notes")
+}
+
+model CreditNoteItem {
+  id           BigInt @id @default(autoincrement())
+  creditNoteId BigInt @map("credit_note_id")
+  // Owning tenant (NOT NULL) — equal to the parent credit note's company. The
+  // composite FKs below pin this line's credit note AND product to this company.
+  companyId    BigInt @map("company_id")
+  // Source return/order line ids — frozen traceability snapshots. Kept as plain
+  // columns (the tenant is already pinned via the credit-note composite FK); the
+  // amounts below are an independent immutable snapshot.
+  returnItemId BigInt @map("return_item_id")
+  orderItemId  BigInt @map("order_item_id")
+  productId    BigInt @map("product_id")
+  description        String
+  quantity           BigInt
+  unitPriceAmount    BigInt   @map("unit_price_amount")
+  taxRateBp          Int      @map("tax_rate_bp")
+  lineSubtotalAmount BigInt   @map("line_subtotal_amount")
+  lineTaxAmount      BigInt   @map("line_tax_amount")
+  lineTotalAmount    BigInt   @map("line_total_amount")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // The credit-note FK is the company-pinned composite; its constraint name is kept
+  // as `credit_note_items_credit_note_id_fkey` (verify-catalog asserts RESTRICT).
+  creditNote CreditNote @relation(fields: [creditNoteId, companyId], references: [id, companyId], onDelete: Restrict, map: "credit_note_items_credit_note_id_fkey")
+  product    Product    @relation(fields: [productId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@index([creditNoteId])
+  @@index([productId])
+  @@index([companyId])
+  @@map("credit_note_items")
 }
 
 // ---------------------------------------------------------------------------

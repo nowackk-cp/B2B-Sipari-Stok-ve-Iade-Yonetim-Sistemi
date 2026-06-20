@@ -70,6 +70,8 @@ async function main() {
     'no_delete_stock_transfers',
     'no_delete_returns',
     'no_delete_invoices',
+    // Credit Note Foundation: a credit note is a financial document, never deleted.
+    'no_delete_credit_notes',
     'no_delete_quotes',
     'no_delete_import_jobs',
     'no_delete_export_jobs',
@@ -117,6 +119,10 @@ async function main() {
   // (company, order) — a duplicate invoice for the same order is blocked while a
   // re-invoice after a VOID stays possible.
   requirePartial('invoices_company_id_order_id_active_key', ['order_id', 'void']);
+  // Credit Note Foundation: at most one ACTIVE (non-VOID) credit note per
+  // (company, return) — a duplicate credit note for the same return is blocked
+  // while a re-issue after a VOID stays possible.
+  requirePartial('credit_notes_company_id_return_id_active_key', ['return_id', 'void']);
 
   // 4. CHECK constraints.
   const checks = await prisma.$queryRawUnsafe(`
@@ -209,6 +215,17 @@ async function main() {
     // company-pinned composite FK; it must RESTRICT so a warehouse that still owns
     // an invoice cannot be hard-deleted out from under it.
     'invoices_warehouse_id_company_id_fkey',
+    // Credit Note Foundation: the credit note's return/order/customer/warehouse and
+    // original-invoice FKs, and the line→credit-note/product FKs, are all company-
+    // pinned (or RESTRICT) so a credit note never straddles tenants and a parent
+    // that still owns a credit note cannot be hard-deleted.
+    'credit_notes_return_id_company_id_fkey',
+    'credit_notes_order_id_company_id_fkey',
+    'credit_notes_customer_id_company_id_fkey',
+    'credit_notes_warehouse_id_company_id_fkey',
+    'credit_notes_original_invoice_id_fkey',
+    'credit_note_items_credit_note_id_fkey',
+    'credit_note_items_product_id_company_id_fkey',
   ]) {
     requireNoCascade(name);
   }

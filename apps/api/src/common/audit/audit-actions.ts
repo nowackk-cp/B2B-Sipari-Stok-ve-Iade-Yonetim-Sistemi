@@ -74,6 +74,11 @@ export const AUDIT_ACTIONS = {
   // transaction (ADR-007, RETURN_RULES §3, INVENTORY_RULES §3).
   RETURN_CREATED: 'RETURN_CREATED',
   RETURN_APPROVED: 'RETURN_APPROVED',
+  // Billing (Return Invoice / Credit Note Foundation): a credit note issued for an
+  // APPROVED return of an invoiced order. Its business audit row is written inside
+  // the SAME transaction as the credit note header + line snapshot + the gapless
+  // credit-note number allocation (ADR-007, RETURN_RULES §4, ADR-006).
+  CREDIT_NOTE_ISSUED: 'CREDIT_NOTE_ISSUED',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
