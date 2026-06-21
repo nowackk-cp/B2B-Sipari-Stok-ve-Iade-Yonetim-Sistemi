@@ -382,6 +382,112 @@ describe('Product import/export (integration, real PostgreSQL)', () => {
     expect(await ctx.prisma.product.count({ where: { companyId: b, sku: 'RT-1' } })).toBe(1);
   });
 
+  // --- export formula injection (CSV injection hardening) ------------------
+
+  /** Split an exported CSV into its data rows' raw cells (BOM-free, comma-only
+   * values in these tests, so a simple split is faithful). */
+  function exportCells(csvText: string): string[] {
+    return csvText
+      .split('\r\n')
+      .slice(1) // drop the header row
+      .filter((line) => line.length > 0)
+      .flatMap((line) => line.split(','));
+  }
+
+  it('21. export neutralizes formula-leading sku/name/description (= + - @, no cell starts as a formula)', async () => {
+    const { token, companyId } = await makeUserWith(ctx, ['product:export']);
+    // Each field carries a classic CSV-injection payload (comma-free so the
+    // assertions can split on commas).
+    await ctx.prisma.product.create({
+      data: {
+        companyId,
+        sku: '=cmd|/C calc!A0',
+        name: '+SUM(1+2)',
+        description: '-10+20',
+        isActive: true,
+      },
+    });
+    await ctx.prisma.product.create({
+      data: {
+        companyId,
+        sku: 'AT-1',
+        name: '@HYPERLINK(evil)',
+        isActive: true,
+      },
+    });
+
+    const res = await request(ctx.http)
+      .get(EXPORT)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+
+    // The dangerous values survive as literal text, single-quote prefixed.
+    expect(res.text).toContain("'=cmd|/C calc!A0");
+    expect(res.text).toContain("'+SUM(1+2)");
+    expect(res.text).toContain("'-10+20");
+    expect(res.text).toContain("'@HYPERLINK(evil)");
+
+    // NOT ONE data cell begins with a formula trigger character.
+    for (const cell of exportCells(res.text)) {
+      expect(/^[=+\-@\t\r\n]/.test(cell)).toBe(false);
+    }
+  });
+
+  it('22. export neutralizes a formula hidden behind leading whitespace', async () => {
+    const { token, companyId } = await makeUserWith(ctx, ['product:export']);
+    await ctx.prisma.product.create({
+      data: { companyId, sku: 'WS-1', name: '   =1+1', isActive: true },
+    });
+    const res = await request(ctx.http)
+      .get(EXPORT)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    // Excel trims leading spaces, so a leading-space formula is still neutralized.
+    expect(res.text).toContain("'   =1+1");
+    for (const cell of exportCells(res.text)) {
+      expect(/^ *[=+\-@\t\r\n]/.test(cell)).toBe(false);
+    }
+  });
+
+  it('23. export leaves ordinary (non-formula) values byte-for-byte unchanged', async () => {
+    const { token, companyId } = await makeUserWith(ctx, ['product:export']);
+    await ctx.prisma.product.create({
+      data: {
+        companyId,
+        sku: 'SKU-001',
+        name: 'Product Name',
+        description: 'A normal description.',
+        isActive: true,
+      },
+    });
+    const res = await request(ctx.http)
+      .get(EXPORT)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    // No leading single quote is introduced for safe cells.
+    expect(res.text).toContain('SKU-001,Product Name,A normal description.,');
+    expect(res.text).not.toContain("'SKU-001");
+  });
+
+  it('24. export still quotes commas/newlines/quotes (even when also neutralized)', async () => {
+    const { token, companyId } = await makeUserWith(ctx, ['product:export']);
+    // Safe value with a comma → quoted, unchanged content.
+    await ctx.prisma.product.create({
+      data: { companyId, sku: 'Q-1', name: 'Foo, Bar', isActive: true },
+    });
+    // Formula value that ALSO contains a comma → neutralized AND quoted.
+    await ctx.prisma.product.create({
+      data: { companyId, sku: 'Q-2', name: '=Foo, "Bar"', isActive: true },
+    });
+    const res = await request(ctx.http)
+      .get(EXPORT)
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
+    expect(res.text).toContain('"Foo, Bar"');
+    // Single-quote prefix is inside the quoting; embedded quotes are doubled.
+    expect(res.text).toContain('"\'=Foo, ""Bar"""');
+  });
+
   // --- existing catalog CRUD is untouched ----------------------------------
 
   it('20. existing catalog CRUD still works alongside the new routes', async () => {

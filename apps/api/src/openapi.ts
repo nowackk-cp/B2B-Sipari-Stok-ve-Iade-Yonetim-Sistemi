@@ -22,10 +22,19 @@ const ENV_DEFAULTS: Record<string, string> = {
   S3_SECRET_ACCESS_KEY: 'placeholder-secret',
   S3_BUCKET: 'b2b-files',
   SMTP_HOST: 'localhost',
+  // NODE_ENV is forced to 'production' above, which makes the mail relay
+  // credentials mandatory (requireProductionMail). Spec generation never sends
+  // mail, so dummy-safe placeholders satisfy the boot validation without
+  // relaxing the real production schema.
+  SMTP_USER: 'openapi-placeholder-smtp-user',
+  SMTP_PASSWORD: 'openapi-placeholder-smtp-password',
   SWAGGER_ENABLED: 'false',
   // Spec generation reflects metadata only (no signing happens); a placeholder
   // satisfies the >=32-char fail-fast check.
   JWT_ACCESS_SECRET: 'openapi-placeholder-access-secret-32chars',
+  // The delivery cipher key never derives a key during spec generation; a
+  // >=32-byte placeholder satisfies the fail-fast length check.
+  PASSWORD_RESET_DELIVERY_KEY: 'openapi-placeholder-delivery-key-32bytes',
 };
 
 for (const [key, value] of Object.entries(ENV_DEFAULTS)) {

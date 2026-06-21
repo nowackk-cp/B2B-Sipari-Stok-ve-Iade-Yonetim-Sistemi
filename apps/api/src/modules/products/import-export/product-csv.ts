@@ -93,6 +93,29 @@ export function parseCsv(input: string): ParsedCsv {
   return { header: header as string[], rows };
 }
 
+/**
+ * A cell is treated as formula-injection risk when, after any leading spaces, it
+ * begins with a character a spreadsheet may interpret as a formula/command:
+ * `=`, `+`, `-`, `@`, or a control whitespace (tab / CR / LF). Leading spaces are
+ * matched explicitly because Excel/LibreOffice trim them before parsing a
+ * formula. Tab/CR/LF are themselves dangerous leads, so they are listed in the
+ * trigger class rather than skipped as whitespace.
+ */
+const FORMULA_INJECTION_LEAD = /^ *[=+\-@\t\r\n]/;
+
+/**
+ * Neutralise a cell that a spreadsheet could execute as a formula/command (CSV
+ * "formula injection" / DDE). The value's data is preserved verbatim; a single
+ * quote is prepended so Excel/LibreOffice/Google Sheets render it as a literal
+ * text cell instead of evaluating it. Safe cells are returned unchanged.
+ *
+ * This is an EXPORT-only concern: it shapes the bytes we hand to a spreadsheet.
+ * The import parser never calls this — re-importing keeps treating cells as data.
+ */
+export function sanitizeCsvCell(value: string): string {
+  return FORMULA_INJECTION_LEAD.test(value) ? `'${value}` : value;
+}
+
 /** Quote a single cell when it contains a comma, quote, or newline. */
 function encodeCell(value: string): string {
   if (/[",\r\n]/.test(value)) {
@@ -104,15 +127,20 @@ function encodeCell(value: string): string {
 /**
  * Serialise a header + rows to CSV text (CRLF line endings, the Excel-friendly
  * default). Values are coerced to string; null/undefined become an empty cell.
+ *
+ * Every cell is run through {@link sanitizeCsvCell} first so a product field that
+ * looks like a spreadsheet formula (e.g. a SKU of `=cmd|...`) is exported as inert
+ * literal text — this writer is the single export sink, so the guard is central.
  */
 export function toCsv(
   header: string[],
   rows: Array<Array<string | number | null | undefined>>,
 ): string {
+  const encode = (value: string): string => encodeCell(sanitizeCsvCell(value));
   const lines: string[] = [];
-  lines.push(header.map(encodeCell).join(','));
+  lines.push(header.map(encode).join(','));
   for (const row of rows) {
-    lines.push(row.map((c) => encodeCell(c == null ? '' : String(c))).join(','));
+    lines.push(row.map((c) => encode(c == null ? '' : String(c))).join(','));
   }
   return `${lines.join('\r\n')}\r\n`;
 }
