@@ -20,6 +20,12 @@ export const AUDIT_ACTIONS = {
   PRODUCT_CREATED: 'PRODUCT_CREATED',
   PRODUCT_UPDATED: 'PRODUCT_UPDATED',
   PRODUCT_DELETED: 'PRODUCT_DELETED',
+  // Catalog (Product Import/Export Foundation): a successful bulk CSV import. The
+  // single summary business-audit row is written inside the SAME transaction as
+  // the bulk product insert and the import_jobs/files bookkeeping (ADR-007). A
+  // failed (validation-rejected) import is all-or-nothing: it writes NO products
+  // and NO business-audit row.
+  PRODUCT_IMPORTED: 'PRODUCT_IMPORTED',
   // Warehouses (TASK-012): warehouse master-data mutations. Each writes a
   // business audit row inside the SAME transaction as the change (ADR-007).
   WAREHOUSE_CREATED: 'WAREHOUSE_CREATED',

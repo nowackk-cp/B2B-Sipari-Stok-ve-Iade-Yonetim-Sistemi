@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -10,17 +12,24 @@ import {
   Post,
   Query,
   Req,
+  Res,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
   ApiCreatedResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiProduces,
   ApiTags,
 } from '@nestjs/swagger';
-import type { Request } from 'express';
-import type { ProductListView, ProductView } from '@b2b/contracts';
+import type { Request, Response } from 'express';
+import type { ProductImportResultView, ProductListView, ProductView } from '@b2b/contracts';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthPrincipal } from '../../common/auth/principal';
 import { requestMeta } from '../../common/http/request-meta';
@@ -30,6 +39,19 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQuery } from './dto/list-products.query';
 import { ProductListResponse, ProductResponse } from './dto/product-response.dto';
+import { ImportProductsDto } from './dto/import-products.dto';
+import { ExportProductsQuery } from './dto/export-products.query';
+import { ProductImportResponse } from './dto/product-import-response.dto';
+import { ProductImportService, type UploadedCsvFile } from './import-export/product-import.service';
+import { ProductExportService } from './import-export/product-export.service';
+
+/** Upload guard: cap the import file at 5 MiB (a generous catalog CSV). */
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+
+function parseBoolParam(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return value === 'true';
+}
 
 /**
  * Product catalog REST surface (TASK-011).
@@ -49,7 +71,11 @@ import { ProductListResponse, ProductResponse } from './dto/product-response.dto
 @ApiBearerAuth()
 @Controller('products')
 export class ProductsController {
-  constructor(private readonly products: ProductsService) {}
+  constructor(
+    private readonly products: ProductsService,
+    private readonly imports: ProductImportService,
+    private readonly exports: ProductExportService,
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -62,6 +88,70 @@ export class ProductsController {
     @Req() req: Request,
   ): Promise<ProductView> {
     return this.products.create(principal, dto, requestMeta(req));
+  }
+
+  // NOTE: the static `imports`/`export` routes are declared BEFORE `@Get(':id')`
+  // so Express does not match e.g. `/products/export` as a product id.
+
+  @Post('imports')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('product:import')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: IMPORT_MAX_BYTES } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ type: ImportProductsDto })
+  @ApiOperation({
+    summary: 'Bulk-import products from a CSV file into the caller’s company (all-or-nothing).',
+  })
+  @ApiCreatedResponse({ type: ProductImportResponse, description: 'The completed import summary.' })
+  importProducts(
+    @CurrentUser() principal: AuthPrincipal,
+    @UploadedFile() file: UploadedCsvFile | undefined,
+    @Req() req: Request,
+  ): Promise<ProductImportResultView> {
+    // The multipart body must carry ONLY the file. Any text field (multer parses
+    // them into `req.body`) is rejected — in particular a forged `companyId`, as
+    // the tenant is always the PostgreSQL principal, never client-supplied.
+    const extraFields = Object.keys((req.body ?? {}) as Record<string, unknown>);
+    if (extraFields.length > 0) {
+      throw new BadRequestException(
+        `Unexpected form field(s): ${extraFields.join(', ')}. Only a "file" upload is accepted.`,
+      );
+    }
+    return this.imports.import(principal, file, requestMeta(req));
+  }
+
+  @Get('export')
+  @RequirePermissions('product:export')
+  @Header('Cache-Control', 'no-store')
+  @ApiProduces('text/csv')
+  @ApiOperation({
+    summary: 'Export the caller’s company catalog as a CSV file (active by default).',
+  })
+  @ApiOkResponse({ description: 'A CSV document (text/csv) of the matching products.' })
+  async exportProducts(
+    @CurrentUser() principal: AuthPrincipal,
+    @Query() query: ExportProductsQuery,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<string> {
+    const file = await this.exports.export(principal, {
+      search: query.search?.trim() || undefined,
+      isActive: parseBoolParam(query.isActive),
+      categoryId: query.categoryId ? BigInt(query.categoryId) : undefined,
+    });
+    res.setHeader('Content-Type', file.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+    return file.body;
+  }
+
+  @Get('imports/:id')
+  @RequirePermissions('product:import')
+  @ApiOperation({ summary: 'Get a previously-completed product import by id.' })
+  @ApiOkResponse({ type: ProductImportResponse, description: 'The import summary.' })
+  getImport(
+    @CurrentUser() principal: AuthPrincipal,
+    @Param('id') id: string,
+  ): Promise<ProductImportResultView> {
+    return this.imports.getOne(principal, id);
   }
 
   @Get()

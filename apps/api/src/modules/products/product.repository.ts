@@ -142,6 +142,34 @@ export class ProductRepository {
     });
   }
 
+  /**
+   * All active (not soft-deleted) products of a company matching the export
+   * filters, ordered by SKU, capped at `take`. Mirrors {@link list}'s filter
+   * semantics (search over sku/name, optional isActive/category) but returns the
+   * whole result set in one shot for a CSV/Excel export rather than a page.
+   */
+  async listForExport(
+    companyId: bigint,
+    opts: { take: number; search?: string; isActive?: boolean; categoryId?: bigint },
+    executor?: DbClient,
+  ): Promise<ProductRow[]> {
+    const where: Prisma.ProductWhereInput = { companyId, deletedAt: null };
+    if (opts.isActive !== undefined) where.isActive = opts.isActive;
+    if (opts.categoryId !== undefined) where.categoryId = opts.categoryId;
+    if (opts.search) {
+      where.OR = [
+        { sku: { contains: opts.search, mode: 'insensitive' } },
+        { name: { contains: opts.search, mode: 'insensitive' } },
+      ];
+    }
+    return this.db(executor).product.findMany({
+      where,
+      orderBy: { sku: 'asc' },
+      take: opts.take,
+      select: SELECT,
+    });
+  }
+
   /** Update by internal id (caller has already resolved it within the company). */
   async update(id: bigint, data: ProductWriteData, executor: DbClient): Promise<ProductRow> {
     return executor.product.update({

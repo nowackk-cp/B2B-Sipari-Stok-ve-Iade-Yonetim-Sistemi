@@ -3,6 +3,9 @@ import { AuthorizationModule } from '../authorization/authorization.module';
 import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
 import { ProductRepository } from './product.repository';
+import { ProductImportService } from './import-export/product-import.service';
+import { ProductImportRepository } from './import-export/product-import.repository';
+import { ProductExportService } from './import-export/product-export.service';
 
 /**
  * Catalog product module (TASK-011). Owns the `products` table via
@@ -14,7 +17,13 @@ import { ProductRepository } from './product.repository';
 @Module({
   imports: [AuthorizationModule],
   controllers: [ProductsController],
-  providers: [ProductsService, ProductRepository],
+  providers: [
+    ProductsService,
+    ProductRepository,
+    ProductImportService,
+    ProductImportRepository,
+    ProductExportService,
+  ],
   exports: [ProductsService],
 })
 export class ProductsModule {}

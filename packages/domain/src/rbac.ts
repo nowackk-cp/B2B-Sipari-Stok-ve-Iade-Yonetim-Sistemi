@@ -191,6 +191,20 @@ export const PERMISSIONS: readonly PermissionDef[] = [
     protected: false,
     description: 'Manage categories',
   },
+  {
+    code: 'product:import',
+    module: 'catalog',
+    group: 'CATALOG',
+    protected: false,
+    description: 'Bulk-import products from a CSV/Excel file',
+  },
+  {
+    code: 'product:export',
+    module: 'catalog',
+    group: 'CATALOG',
+    protected: false,
+    description: 'Export the product catalog to a CSV/Excel file',
+  },
   // warehouses
   {
     code: 'warehouse:read',
@@ -650,6 +664,8 @@ const ADMIN_PERMISSIONS: readonly string[] = [
   'product:create',
   'product:update',
   'product:delete',
+  'product:import',
+  'product:export',
   'category:manage',
   'warehouse:read',
   'warehouse:manage',
@@ -704,6 +720,8 @@ const ADMIN_PERMISSIONS: readonly string[] = [
 
 const WAREHOUSE_MANAGER_PERMISSIONS: readonly string[] = [
   'product:read',
+  'product:import',
+  'product:export',
   'warehouse:read',
   'stock:read',
   'stock:receive',
@@ -731,6 +749,7 @@ const WAREHOUSE_MANAGER_PERMISSIONS: readonly string[] = [
 
 const SALES_PERMISSIONS: readonly string[] = [
   'product:read',
+  'product:export',
   'warehouse:read',
   'stock:read',
   'customer:read',
@@ -761,6 +780,7 @@ const SALES_PERMISSIONS: readonly string[] = [
 
 const FINANCE_PERMISSIONS: readonly string[] = [
   'product:read',
+  'product:export',
   'warehouse:read',
   'stock:read',
   'customer:read',
