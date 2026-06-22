@@ -9,9 +9,10 @@ import { OrderStatusBadge } from './order-status-badge';
 import { ApproveOrderDialog } from './approve-order-dialog';
 import { ShipOrderDialog } from './ship-order-dialog';
 import { IssueInvoiceDialog } from './issue-invoice-dialog';
+import { CreateReturnModal } from '../returns/create-return-modal';
 
 /** An open in-drawer lifecycle dialog, with the order snapshot it acts on. */
-type Action = { kind: 'approve' | 'ship' | 'invoice'; order: OrderView } | null;
+type Action = { kind: 'approve' | 'ship' | 'invoice' | 'return'; order: OrderView } | null;
 
 type DetailState =
   | { status: 'loading' }
@@ -32,9 +33,9 @@ function formatVatRate(basisPoints: number): string {
  * the authority — UI hiding is convenience, not security, rule 7):
  *   - DRAFT      → Edit / Cancel (page-routed) + Approve
  *   - APPROVED   → Ship
- *   - SHIPPED    → Issue invoice
+ *   - SHIPPED    → Issue invoice + Create return
  *   - CANCELLED  → no actions
- * Approve/ship/invoice run in IN-DRAWER confirmation dialogs; on success the drawer
+ * Approve/ship/invoice/return run in IN-DRAWER dialogs; on success the drawer
  * re-fetches itself (the status badge updates) AND calls {@link onChanged} so the
  * list page reloads too. Edit/cancel keep the existing page-routed flow.
  */
@@ -272,6 +273,14 @@ export function OrderDetailDrawer({
               <div className="modal-actions" data-testid="detail-shipped-actions">
                 <button
                   type="button"
+                  className="button"
+                  onClick={() => setAction({ kind: 'return', order })}
+                  data-testid="detail-create-return"
+                >
+                  Create return
+                </button>
+                <button
+                  type="button"
                   className="button button-primary"
                   onClick={() => setAction({ kind: 'invoice', order })}
                   data-testid="detail-issue-invoice"
@@ -302,6 +311,13 @@ export function OrderDetailDrawer({
             order={action.order}
             onClose={() => setAction(null)}
             onDone={onLifecycleDone}
+          />
+        ) : null}
+        {action?.kind === 'return' ? (
+          <CreateReturnModal
+            order={action.order}
+            onClose={() => setAction(null)}
+            onCreated={onLifecycleDone}
           />
         ) : null}
       </aside>

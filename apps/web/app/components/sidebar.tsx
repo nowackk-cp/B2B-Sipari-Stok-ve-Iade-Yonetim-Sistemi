@@ -16,7 +16,8 @@ const NAV: ReadonlyArray<{ href: string; label: string; ready: boolean }> = [
   { href: '/orders', label: 'Orders', ready: true },
   { href: '/inventory', label: 'Inventory', ready: false },
   { href: '/invoices', label: 'Invoices', ready: true },
-  { href: '/returns', label: 'Returns', ready: false },
+  { href: '/returns', label: 'Returns', ready: true },
+  { href: '/credit-notes', label: 'Credit Notes', ready: true },
   { href: '/reports', label: 'Reports', ready: false },
 ];
 

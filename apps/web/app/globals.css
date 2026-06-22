@@ -665,6 +665,25 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* Return create line: include-checkbox label + quantity + reason. */
+.order-line input[type='text'],
+.order-line > input:not(.order-line-qty) {
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+}
+
+.return-line-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
 /* ---------- Detail drawer ---------- */
 .drawer-overlay {
   position: fixed;
