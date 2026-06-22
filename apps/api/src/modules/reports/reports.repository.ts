@@ -163,6 +163,7 @@ export class ReportsRepository {
       JOIN "products" p ON p."id" = sb."product_id"
       JOIN "warehouses" w ON w."id" = sb."warehouse_id"
       WHERE p."company_id" = ${companyId}
+        AND w."company_id" = ${companyId}
         AND p."deleted_at" IS NULL
         AND w."deleted_at" IS NULL
         AND p."critical_stock_threshold" IS NOT NULL
@@ -257,6 +258,7 @@ export class ReportsRepository {
       JOIN "products" p ON p."id" = sb."product_id"
       JOIN "warehouses" w ON w."id" = sb."warehouse_id"
       WHERE p."company_id" = ${companyId}
+        AND w."company_id" = ${companyId}
         AND p."deleted_at" IS NULL
         AND w."deleted_at" IS NULL
         ${scopeSql} ${warehouseSql} ${searchSql} ${lowSql} ${cursorSql}

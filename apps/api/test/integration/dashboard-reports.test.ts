@@ -396,6 +396,23 @@ describe('Dashboard / Reports backend foundation (integration, real PostgreSQL)'
     expect(res.body.monthSalesAmount).toEqual([{ amount: '12000', currency: 'TRY' }]);
   });
 
+  it('6c. dashboard low-stock ignores a balance whose warehouse belongs to another company (scope:all)', async () => {
+    const a = await makeTenant(ctx, 'A');
+    const actorA = await makeActor(ctx, a, ALL_PERMS, { global: true });
+    const lowA = await product(ctx, a, { criticalStockThreshold: 20n });
+
+    // Cross-company pairing: A's product + B's warehouse in a single stock_balances
+    // row. Without a `warehouses.company_id` pin this low balance would leak into A's
+    // low-stock count even though the warehouse is another tenant's.
+    const b = await makeTenant(ctx, 'B');
+    const whB = await createWarehouse(ctx.prisma, b, { code: 'B-WH' });
+    await balance(ctx, lowA.id, whB.id, 5n, 0n); // available 5 ≤ 20, but B's warehouse
+
+    const res = await get(ctx, actorA.token, DASHBOARD).expect(200);
+    // warehouse:scope:all is company-local — B's warehouse must never be counted.
+    expect(res.body.lowStockProducts).toBe(0);
+  });
+
   it('15. a no-warehouse-scope actor sees zero warehouse-bound figures (company master still counts)', async () => {
     const companyId = await makeTenant(ctx);
     const actor = await makeActor(ctx, companyId, ALL_PERMS); // no scope, not global
@@ -601,6 +618,27 @@ describe('Dashboard / Reports backend foundation (integration, real PostgreSQL)'
     const res = await get(ctx, actor.token, INVENTORY).expect(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].sku).toBe('LIVE');
+  });
+
+  it('12c. inventory report does not leak a balance whose warehouse belongs to another company (scope:all)', async () => {
+    const a = await makeTenant(ctx, 'A');
+    const actorA = await makeActor(ctx, a, ALL_PERMS, { global: true });
+    const whA = await createWarehouse(ctx.prisma, a, { code: 'A-WH' });
+    const pA = await product(ctx, a, { sku: 'A-OWN' });
+    await balance(ctx, pA.id, whA.id, 5n, 0n); // legitimate A row
+
+    // Cross-company pairing: A's product + B's warehouse in one stock_balances row.
+    // Tenant is pinned through the product, but the warehouse is another company's;
+    // without `warehouses.company_id` this row (and B's public id + quantities) leaks.
+    const b = await makeTenant(ctx, 'B');
+    const whB = await createWarehouse(ctx.prisma, b, { code: 'B-WH' });
+    await balance(ctx, pA.id, whB.id, 999n, 0n); // must never surface for A
+
+    const res = await get(ctx, actorA.token, INVENTORY).expect(200);
+    // scope:all is company-local: only A's own warehouse row is visible.
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].sku).toBe('A-OWN');
+    expect(res.body.data.some((r: { onHand: string }) => r.onHand === '999')).toBe(false);
   });
 
   it('12b. inventory report search matches name or SKU', async () => {
