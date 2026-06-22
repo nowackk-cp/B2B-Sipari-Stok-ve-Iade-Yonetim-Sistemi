@@ -10,7 +10,7 @@ import { cn } from '@b2b/ui';
  */
 const NAV: ReadonlyArray<{ href: string; label: string; ready: boolean }> = [
   { href: '/dashboard', label: 'Dashboard', ready: true },
-  { href: '/products', label: 'Products', ready: false },
+  { href: '/products', label: 'Products', ready: true },
   { href: '/warehouses', label: 'Warehouses', ready: false },
   { href: '/customers', label: 'Customers', ready: false },
   { href: '/orders', label: 'Orders', ready: false },

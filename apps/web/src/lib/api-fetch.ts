@@ -40,6 +40,52 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
   accessToken?: string | null;
   /** JSON-serialisable request body; the helper stringifies and sets content-type. */
   json?: unknown;
+  /**
+   * Raw request body (e.g. a `FormData` multipart upload). When set, no
+   * `content-type` is added so the browser can attach the multipart boundary
+   * itself. Mutually exclusive with {@link ApiFetchOptions.json}.
+   */
+  body?: BodyInit | null;
+}
+
+/** Issue the request with the shared config (cookies + bearer + content-type). */
+async function apiRequest(path: string, opts: ApiFetchOptions): Promise<Response> {
+  const { accessToken, json, body, headers, ...rest } = opts;
+  const hasJson = json !== undefined;
+
+  return fetch(`${apiBaseUrl()}${path}`, {
+    ...rest,
+    credentials: 'include',
+    headers: {
+      accept: 'application/json',
+      ...(hasJson ? { 'content-type': 'application/json' } : {}),
+      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
+      ...headers,
+    },
+    body: hasJson ? JSON.stringify(json) : (body ?? undefined),
+  });
+}
+
+/** Read the RFC 7807 body of a non-2xx response and throw it as an {@link ApiError}. */
+async function throwProblem(res: Response): Promise<never> {
+  const problem = (await res.json().catch(() => undefined)) as ProblemDetails | undefined;
+  throw new ApiError(res.status, problem?.title ?? `Request failed: ${res.status}`, problem);
+}
+
+/**
+ * Fetch from the API and return the raw {@link Response} (for non-JSON payloads
+ * such as a CSV export blob, where the caller needs `res.blob()` and headers).
+ *
+ * Same wire config as {@link apiFetch} — always sends cookies, attaches the
+ * bearer token, and throws {@link ApiError} (parsed problem+json) on non-2xx.
+ */
+export async function apiFetchResponse(
+  path: string,
+  opts: ApiFetchOptions = {},
+): Promise<Response> {
+  const res = await apiRequest(path, opts);
+  if (!res.ok) await throwProblem(res);
+  return res;
 }
 
 /**
@@ -51,20 +97,7 @@ export interface ApiFetchOptions extends Omit<RequestInit, 'body'> {
  * - Returns `undefined` for 204 No Content.
  */
 export async function apiFetch<T>(path: string, opts: ApiFetchOptions = {}): Promise<T> {
-  const { accessToken, json, headers, ...rest } = opts;
-  const hasBody = json !== undefined;
-
-  const res = await fetch(`${apiBaseUrl()}${path}`, {
-    ...rest,
-    credentials: 'include',
-    headers: {
-      accept: 'application/json',
-      ...(hasBody ? { 'content-type': 'application/json' } : {}),
-      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
-      ...headers,
-    },
-    body: hasBody ? JSON.stringify(json) : undefined,
-  });
+  const res = await apiRequest(path, opts);
 
   if (res.status === 204) return undefined as T;
 
