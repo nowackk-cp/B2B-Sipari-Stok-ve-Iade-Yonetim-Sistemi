@@ -1,4 +1,5 @@
 import type { AuthSessionView, UserProfileView } from '@b2b/contracts';
+import { apiFetch } from './api-fetch';
 
 /**
  * Browser auth client.
@@ -11,50 +12,34 @@ import type { AuthSessionView, UserProfileView } from '@b2b/contracts';
  */
 let accessToken: string | null = null;
 
-function apiBaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (!url) throw new Error('NEXT_PUBLIC_API_BASE_URL is not configured');
-  return url;
-}
-
-async function postJson(path: string, body?: unknown): Promise<Response> {
-  return fetch(`${apiBaseUrl()}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    credentials: 'include', // send/receive the HttpOnly refresh cookie
-    body: body ? JSON.stringify(body) : undefined,
-  });
-}
-
 export function getAccessToken(): string | null {
   return accessToken;
 }
 
+/** Test/SSR seam: set or clear the in-memory access token. */
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
 export async function login(email: string, password: string): Promise<UserProfileView> {
-  const res = await postJson('/auth/login', { email, password });
-  if (!res.ok) throw new Error('invalid_credentials');
-  const data = (await res.json()) as AuthSessionView;
+  const data = await apiFetch<AuthSessionView>('/auth/login', {
+    method: 'POST',
+    json: { email, password },
+  });
   accessToken = data.accessToken;
   return data.user;
 }
 
 /** Re-derive an access token from the refresh cookie (e.g. after a reload). */
 export async function refresh(): Promise<AuthSessionView> {
-  const res = await postJson('/auth/refresh');
-  if (!res.ok) throw new Error('no_session');
-  const data = (await res.json()) as AuthSessionView;
+  const data = await apiFetch<AuthSessionView>('/auth/refresh', { method: 'POST' });
   accessToken = data.accessToken;
   return data;
 }
 
 export async function me(): Promise<UserProfileView> {
   if (!accessToken) throw new Error('no_session');
-  const res = await fetch(`${apiBaseUrl()}/auth/me`, {
-    headers: { authorization: `Bearer ${accessToken}` },
-    credentials: 'include',
-  });
-  if (!res.ok) throw new Error('no_session');
-  return (await res.json()) as UserProfileView;
+  return apiFetch<UserProfileView>('/auth/me', { accessToken });
 }
 
 /** Ensure a usable session, refreshing from the cookie when the token is gone. */
@@ -67,7 +52,7 @@ export async function ensureSession(): Promise<UserProfileView> {
 
 export async function logout(): Promise<void> {
   try {
-    await postJson('/auth/logout');
+    await apiFetch('/auth/logout', { method: 'POST' });
   } finally {
     accessToken = null;
   }

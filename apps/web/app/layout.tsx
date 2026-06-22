@@ -5,19 +5,13 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: `${tokens.brand} — Console`,
-  description: 'Back-office operations console (foundation).',
+  description: 'Back-office operations console.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="tr">
-      <body>
-        <header className="app-header">
-          <h1>{tokens.brand}</h1>
-          <div className="subtitle">Operations Console · Foundation</div>
-        </header>
-        <main className="container">{children}</main>
-      </body>
+    <html lang="en">
+      <body>{children}</body>
     </html>
   );
 }
