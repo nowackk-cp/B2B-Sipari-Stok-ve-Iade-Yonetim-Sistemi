@@ -256,6 +256,7 @@ export default function OrdersPage() {
           onClose={() => setModal(null)}
           onEdit={(order) => setModal({ type: 'edit', order })}
           onCancel={(order) => setModal({ type: 'cancel', order })}
+          onChanged={load}
         />
       ) : null}
     </section>

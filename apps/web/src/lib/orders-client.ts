@@ -11,10 +11,11 @@ import { getAccessToken, refresh } from './auth-client';
  * access token is transparently refreshed once on a 401 (same pattern as the
  * products/warehouses/customers clients).
  *
- * This slice covers the DRAFT lifecycle only: list, read, create, edit (PATCH)
- * and cancel. Approve/ship live on the backend but are out of scope for this UI.
- * `companyId` is NEVER sent and prices are NEVER client-supplied — the owning
- * tenant and every line price/tax/total are server-resolved (rules 3, 12, 16).
+ * This slice covers the full sales lifecycle the UI can drive: list, read,
+ * create, edit (PATCH), cancel, APPROVE (server reserves stock) and SHIP (server
+ * commits reserved stock). `companyId` is NEVER sent and prices are NEVER
+ * client-supplied — the owning tenant and every line price/tax/total are
+ * server-resolved (rules 3, 12, 16). Invoice issue lives in `invoices-client.ts`.
  */
 
 /**
@@ -139,6 +140,41 @@ export function cancelOrder(id: string, reason?: string | null): Promise<OrderVi
       method: 'POST',
       json: reason ? { reason } : {},
       accessToken,
+    }),
+  );
+}
+
+/**
+ * Approve a DRAFT order — the server atomically reserves stock for every line and
+ * transitions DRAFT→APPROVED (rules 4, 15; ADR-003). No `Idempotency-Key`: the
+ * expected-status conditional transition is itself the replay guard (a second
+ * approve of a now-APPROVED order is a clean 409), and approval writes no ledger
+ * movement. A shortfall on any line is an all-or-nothing 409 and the order stays
+ * DRAFT — surfaced to the caller as an {@link ApiError}.
+ */
+export function approveOrder(id: string): Promise<OrderView> {
+  return withFreshToken((accessToken) =>
+    apiFetch<OrderView>(`/orders/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      accessToken,
+    }),
+  );
+}
+
+/**
+ * Ship an APPROVED order — the server atomically commits the reserved stock
+ * (on_hand−, reserved−, one SHIPMENT ledger movement) and transitions
+ * APPROVED→SHIPPED (rules 4, 14, 15; ORDER_RULES §5). `Idempotency-Key` is
+ * MANDATORY (rule 9): the caller passes a STABLE key so a transient-failure retry
+ * replays the same shipment instead of double-committing. The same key reused for
+ * a different order is a 409. No line DTO — shipment is full-order.
+ */
+export function shipOrder(id: string, idempotencyKey: string): Promise<OrderView> {
+  return withFreshToken((accessToken) =>
+    apiFetch<OrderView>(`/orders/${encodeURIComponent(id)}/ship`, {
+      method: 'POST',
+      accessToken,
+      headers: { 'idempotency-key': idempotencyKey },
     }),
   );
 }

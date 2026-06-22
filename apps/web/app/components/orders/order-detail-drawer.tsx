@@ -6,6 +6,12 @@ import { ApiError } from '../../../src/lib/api-fetch';
 import { getOrder } from '../../../src/lib/orders-client';
 import { formatMoney } from '../../../src/lib/money';
 import { OrderStatusBadge } from './order-status-badge';
+import { ApproveOrderDialog } from './approve-order-dialog';
+import { ShipOrderDialog } from './ship-order-dialog';
+import { IssueInvoiceDialog } from './issue-invoice-dialog';
+
+/** An open in-drawer lifecycle dialog, with the order snapshot it acts on. */
+type Action = { kind: 'approve' | 'ship' | 'invoice'; order: OrderView } | null;
 
 type DetailState =
   | { status: 'loading' }
@@ -20,22 +26,36 @@ function formatVatRate(basisPoints: number): string {
 /**
  * Right-hand drawer showing one order in full: header, customer/warehouse, status,
  * totals and the line items (product, sku, quantity, unit price, tax rate, line
- * total). It re-fetches the order on open (the list row is only a summary). Edit
- * and cancel actions are shown ONLY for a DRAFT order — UI hiding mirrors the
- * backend rule that only drafts are mutable (the server is still the authority).
+ * total). It re-fetches the order on open (the list row is only a summary).
+ *
+ * Actions are status-driven, mirroring the backend lifecycle (the server is always
+ * the authority — UI hiding is convenience, not security, rule 7):
+ *   - DRAFT      → Edit / Cancel (page-routed) + Approve
+ *   - APPROVED   → Ship
+ *   - SHIPPED    → Issue invoice
+ *   - CANCELLED  → no actions
+ * Approve/ship/invoice run in IN-DRAWER confirmation dialogs; on success the drawer
+ * re-fetches itself (the status badge updates) AND calls {@link onChanged} so the
+ * list page reloads too. Edit/cancel keep the existing page-routed flow.
  */
 export function OrderDetailDrawer({
   orderId,
   onClose,
   onEdit,
   onCancel,
+  onChanged,
 }: {
   orderId: string;
   onClose: () => void;
   onEdit: (order: OrderView) => void;
   onCancel: (order: OrderView) => void;
+  onChanged: () => void;
 }) {
   const [state, setState] = useState<DetailState>({ status: 'loading' });
+  // The dialog carries its own order snapshot, so a post-action drawer re-fetch
+  // (which briefly nulls `order` while loading) does NOT unmount it — important for
+  // the invoice dialog, which stays open to show the allocated number.
+  const [action, setAction] = useState<Action>(null);
 
   const load = useCallback(() => {
     let active = true;
@@ -69,6 +89,14 @@ export function OrderDetailDrawer({
 
   const order = state.status === 'ready' ? state.order : null;
   const isDraft = order?.status === 'DRAFT';
+  const isApproved = order?.status === 'APPROVED';
+  const isShipped = order?.status === 'SHIPPED';
+
+  /** A lifecycle action committed: re-fetch the drawer AND refresh the list. */
+  const onLifecycleDone = useCallback(() => {
+    load();
+    onChanged();
+  }, [load, onChanged]);
 
   return (
     <div className="drawer-overlay" onClick={onClose} role="presentation">
@@ -210,15 +238,71 @@ export function OrderDetailDrawer({
                 </button>
                 <button
                   type="button"
-                  className="button button-primary"
+                  className="button"
                   onClick={() => onEdit(order)}
                   data-testid="detail-edit"
                 >
                   Edit
                 </button>
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => setAction({ kind: 'approve', order })}
+                  data-testid="detail-approve"
+                >
+                  Approve
+                </button>
+              </div>
+            ) : null}
+
+            {isApproved ? (
+              <div className="modal-actions" data-testid="detail-approved-actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => setAction({ kind: 'ship', order })}
+                  data-testid="detail-ship"
+                >
+                  Ship order
+                </button>
+              </div>
+            ) : null}
+
+            {isShipped ? (
+              <div className="modal-actions" data-testid="detail-shipped-actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => setAction({ kind: 'invoice', order })}
+                  data-testid="detail-issue-invoice"
+                >
+                  Issue invoice
+                </button>
               </div>
             ) : null}
           </div>
+        ) : null}
+
+        {action?.kind === 'approve' ? (
+          <ApproveOrderDialog
+            order={action.order}
+            onClose={() => setAction(null)}
+            onDone={onLifecycleDone}
+          />
+        ) : null}
+        {action?.kind === 'ship' ? (
+          <ShipOrderDialog
+            order={action.order}
+            onClose={() => setAction(null)}
+            onDone={onLifecycleDone}
+          />
+        ) : null}
+        {action?.kind === 'invoice' ? (
+          <IssueInvoiceDialog
+            order={action.order}
+            onClose={() => setAction(null)}
+            onDone={onLifecycleDone}
+          />
         ) : null}
       </aside>
     </div>

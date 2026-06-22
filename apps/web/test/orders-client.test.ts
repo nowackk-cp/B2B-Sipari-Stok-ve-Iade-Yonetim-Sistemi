@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  approveOrder,
   cancelOrder,
   createOrder,
   getOrder,
   listOrders,
+  shipOrder,
   updateOrder,
 } from '../src/lib/orders-client';
 import { setAccessToken } from '../src/lib/auth-client';
@@ -109,5 +111,42 @@ describe('orders-client', () => {
     expect(init).toMatchObject({ credentials: 'include' });
     const sent = JSON.parse(init?.body as string) as Record<string, unknown>;
     expect(sent.reason).toBe('changed mind');
+  });
+
+  it('approves via POST :id/approve with the bearer token and NO idempotency key', async () => {
+    const fn = mockFetch(JSON.stringify({ id: 'o1', status: 'APPROVED' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    await approveOrder('o1');
+
+    const [url, init] = fn.mock.calls[0]!;
+    expect(String(url)).toBe('http://api.test/api/v1/orders/o1/approve');
+    expect(init?.method).toBe('POST');
+    expect(init).toMatchObject({ credentials: 'include' });
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.authorization).toBe('Bearer tok-123');
+    expect(headers['idempotency-key']).toBeUndefined();
+    // No client body — totals/status are server-resolved.
+    expect(init?.body).toBeUndefined();
+  });
+
+  it('ships via POST :id/ship sending the Idempotency-Key header (no body)', async () => {
+    const fn = mockFetch(JSON.stringify({ id: 'o1', status: 'SHIPPED' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    await shipOrder('o1', 'idem-key-123');
+
+    const [url, init] = fn.mock.calls[0]!;
+    expect(String(url)).toBe('http://api.test/api/v1/orders/o1/ship');
+    expect(init?.method).toBe('POST');
+    expect(init).toMatchObject({ credentials: 'include' });
+    const headers = init?.headers as Record<string, string>;
+    expect(headers['idempotency-key']).toBe('idem-key-123');
+    expect(headers.authorization).toBe('Bearer tok-123');
+    expect(init?.body).toBeUndefined();
   });
 });
