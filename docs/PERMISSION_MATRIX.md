@@ -41,6 +41,7 @@
 | audit | `audit:read` | Audit log görüntüle (kendi modül/scope) |
 | audit | 🔒 `audit:read:all` | Tüm audit (sistem geneli) |
 | dashboard | `dashboard:read` | Dashboard |
+| reports | `report:read` | Satış/stok/iade raporları |
 | system | 🔒 `system:read` | Job/sistem logları |
 
 ## 2. Rol → Permission Eşlemesi (seed)
@@ -84,6 +85,7 @@
 | audit:read (scope/modül) | ✅ | ✅ | – | – | ◐³ | – |
 | 🔒 audit:read:all | ✅ | – | – | – | – | – |
 | dashboard:read | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| report:read | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 🔒 system:read | ✅ | – | – | – | – | – |
 
 Notlar:

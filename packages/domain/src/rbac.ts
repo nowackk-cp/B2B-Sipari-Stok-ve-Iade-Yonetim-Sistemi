@@ -567,6 +567,14 @@ export const PERMISSIONS: readonly PermissionDef[] = [
     protected: false,
     description: 'View dashboard',
   },
+  // reports
+  {
+    code: 'report:read',
+    module: 'reports',
+    group: 'DASHBOARD',
+    protected: false,
+    description: 'View sales/inventory/returns reports',
+  },
   // system
   {
     code: 'system:read',
@@ -716,6 +724,7 @@ const ADMIN_PERMISSIONS: readonly string[] = [
   'notification:read',
   'audit:read',
   'dashboard:read',
+  'report:read',
 ];
 
 const WAREHOUSE_MANAGER_PERMISSIONS: readonly string[] = [
@@ -745,6 +754,7 @@ const WAREHOUSE_MANAGER_PERMISSIONS: readonly string[] = [
   'export:run',
   'notification:read',
   'dashboard:read',
+  'report:read',
 ];
 
 const SALES_PERMISSIONS: readonly string[] = [
@@ -776,6 +786,7 @@ const SALES_PERMISSIONS: readonly string[] = [
   'export:run',
   'notification:read',
   'dashboard:read',
+  'report:read',
 ];
 
 const FINANCE_PERMISSIONS: readonly string[] = [
@@ -804,6 +815,7 @@ const FINANCE_PERMISSIONS: readonly string[] = [
   'notification:read',
   'audit:read',
   'dashboard:read',
+  'report:read',
 ];
 
 const VIEWER_PERMISSIONS: readonly string[] = [
@@ -819,6 +831,7 @@ const VIEWER_PERMISSIONS: readonly string[] = [
   'file:read',
   'notification:read',
   'dashboard:read',
+  'report:read',
 ];
 
 /**
