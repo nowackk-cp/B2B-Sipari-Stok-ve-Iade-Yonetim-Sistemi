@@ -12,7 +12,7 @@ const NAV: ReadonlyArray<{ href: string; label: string; ready: boolean }> = [
   { href: '/dashboard', label: 'Dashboard', ready: true },
   { href: '/products', label: 'Products', ready: true },
   { href: '/warehouses', label: 'Warehouses', ready: true },
-  { href: '/customers', label: 'Customers', ready: false },
+  { href: '/customers', label: 'Customers', ready: true },
   { href: '/orders', label: 'Orders', ready: false },
   { href: '/inventory', label: 'Inventory', ready: false },
   { href: '/invoices', label: 'Invoices', ready: false },
