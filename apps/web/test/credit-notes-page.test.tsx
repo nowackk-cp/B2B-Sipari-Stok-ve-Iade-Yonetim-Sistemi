@@ -107,7 +107,9 @@ describe('CreditNotesPage — list', () => {
     fireEvent.click(screen.getByTestId('page-next'));
 
     await waitFor(() =>
-      expect(listCreditNotes).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'cur-2' })),
+      expect(listCreditNotes).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cursor: 'cur-2' }),
+      ),
     );
     await screen.findByText('CRN-2026-000002');
   });

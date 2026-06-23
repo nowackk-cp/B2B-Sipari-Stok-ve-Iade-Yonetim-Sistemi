@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  getInvoice,
-  issueInvoiceForOrder,
-  listInvoices,
-} from '../src/lib/invoices-client';
+import { getInvoice, issueInvoiceForOrder, listInvoices } from '../src/lib/invoices-client';
 import { setAccessToken } from '../src/lib/auth-client';
 
 function mockFetch(body: BodyInit | null, init: ResponseInit) {

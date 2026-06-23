@@ -8,7 +8,9 @@ vi.mock('next/navigation', () => ({
 }));
 
 function hrefOf(label: string): string {
-  return screen.getByRole('link', { name: new RegExp(`^${label}`, 'i') }).getAttribute('href') ?? '';
+  return (
+    screen.getByRole('link', { name: new RegExp(`^${label}`, 'i') }).getAttribute('href') ?? ''
+  );
 }
 
 describe('Sidebar', () => {

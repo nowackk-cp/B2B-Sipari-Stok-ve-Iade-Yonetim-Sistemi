@@ -8,7 +8,12 @@ import type { WarehouseOption } from './report-helpers';
 
 type State =
   | { status: 'loading' }
-  | { status: 'ready'; rows: InventoryReportRowView[]; hasNextPage: boolean; nextCursor: string | null }
+  | {
+      status: 'ready';
+      rows: InventoryReportRowView[];
+      hasNextPage: boolean;
+      nextCursor: string | null;
+    }
   | { status: 'error'; message: string };
 
 /**
@@ -171,11 +176,17 @@ export function InventoryReport({ warehouses }: { warehouses: WarehouseOption[] 
                     <td>
                       <code>{r.warehouseId}</code>
                     </td>
-                    <td className="num" data-testid={`inventory-onhand-${r.productId}-${r.warehouseId}`}>
+                    <td
+                      className="num"
+                      data-testid={`inventory-onhand-${r.productId}-${r.warehouseId}`}
+                    >
                       {formatQuantity(r.onHand)}
                     </td>
                     <td className="num">{formatQuantity(r.reserved)}</td>
-                    <td className="num" data-testid={`inventory-available-${r.productId}-${r.warehouseId}`}>
+                    <td
+                      className="num"
+                      data-testid={`inventory-available-${r.productId}-${r.warehouseId}`}
+                    >
                       {formatQuantity(r.available)}
                     </td>
                     <td className="num">{formatQuantity(r.criticalStockThreshold)}</td>

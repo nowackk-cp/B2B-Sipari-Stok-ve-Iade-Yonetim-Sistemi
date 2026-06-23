@@ -3,7 +3,11 @@
 import { type FormEvent, useState } from 'react';
 import Link from 'next/link';
 import type { OrderView, ReturnView } from '@b2b/contracts';
-import { createReturn, problemMessages, type CreateReturnItemInput } from '../../../src/lib/returns-client';
+import {
+  createReturn,
+  problemMessages,
+  type CreateReturnItemInput,
+} from '../../../src/lib/returns-client';
 import { newIdempotencyKey } from '../../../src/lib/idempotency';
 import { Modal } from '../modal';
 
@@ -126,8 +130,8 @@ export function CreateReturnModal({
       {created ? (
         <div data-testid="create-return-success">
           <p>
-            Return <strong data-testid="created-return-no">{created.returnNo}</strong> was raised for
-            order <strong>{order.orderNo}</strong>.
+            Return <strong data-testid="created-return-no">{created.returnNo}</strong> was raised
+            for order <strong>{order.orderNo}</strong>.
           </p>
           <div className="modal-actions">
             <button type="button" className="button" onClick={onClose}>
@@ -153,7 +157,11 @@ export function CreateReturnModal({
 
           <div className="field-wide order-lines">
             {lines.map((line, index) => (
-              <div className="order-line" key={line.productId} data-testid={`return-line-${line.productId}`}>
+              <div
+                className="order-line"
+                key={line.productId}
+                data-testid={`return-line-${line.productId}`}
+              >
                 <label className="return-line-check">
                   <input
                     type="checkbox"

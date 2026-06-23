@@ -172,7 +172,10 @@ export function ReturnDetailDrawer({
                 </thead>
                 <tbody>
                   {ret.items.map((item, i) => (
-                    <tr key={`${item.productId}-${i}`} data-testid={`return-item-${item.productId}`}>
+                    <tr
+                      key={`${item.productId}-${i}`}
+                      data-testid={`return-item-${item.productId}`}
+                    >
                       <td>
                         <code>{item.productId}</code>
                       </td>

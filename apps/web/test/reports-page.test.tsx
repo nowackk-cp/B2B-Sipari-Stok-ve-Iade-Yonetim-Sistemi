@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type {
-  InventoryReportView,
-  ReturnsReportView,
-  SalesReportView,
-} from '@b2b/contracts';
+import type { InventoryReportView, ReturnsReportView, SalesReportView } from '@b2b/contracts';
 import ReportsPage from '../app/(app)/reports/page';
 import * as reportsClient from '../src/lib/reports-client';
 import * as warehousesClient from '../src/lib/warehouses-client';
@@ -237,5 +233,18 @@ describe('ReportsPage', () => {
     await waitFor(() => expect(screen.getByTestId('inventory-table')).toBeDefined());
     expect(fetchInventoryReport).toHaveBeenCalledTimes(1);
     expect(fetchSalesReport).not.toHaveBeenCalled();
+  });
+
+  it('follows a same-route ?tab= change (sidebar Inventory link while on /reports)', async () => {
+    const { rerender } = render(<ReportsPage />);
+    await waitFor(() => expect(screen.getByTestId('sales-table')).toBeDefined());
+
+    // Simulate the App Router updating the query without remounting the page:
+    // useSearchParams now reports ?tab=inventory and the page re-renders.
+    searchParamsValue = new URLSearchParams('tab=inventory');
+    rerender(<ReportsPage />);
+
+    await waitFor(() => expect(screen.getByTestId('inventory-table')).toBeDefined());
+    expect(fetchInventoryReport).toHaveBeenCalledTimes(1);
   });
 });

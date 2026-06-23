@@ -95,7 +95,9 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 /** List the caller's company returns (cursor-paginated, scope-filtered server-side). */
 export function listReturns(query: ReturnListQuery = {}): Promise<ReturnListView> {
   const qs = buildQuery({ limit: query.limit, cursor: query.cursor, status: query.status });
-  return withFreshToken((accessToken) => apiFetch<ReturnListView>(`/returns${qs}`, { accessToken }));
+  return withFreshToken((accessToken) =>
+    apiFetch<ReturnListView>(`/returns${qs}`, { accessToken }),
+  );
 }
 
 /** Get one return (with its lines) by public id. */

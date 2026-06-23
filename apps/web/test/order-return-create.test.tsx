@@ -176,11 +176,16 @@ describe('Order detail — create return form', () => {
     await waitFor(() => expect(createReturn).toHaveBeenCalledTimes(1));
     const [orderId, input, key] = createReturn.mock.calls[0]!;
     expect(orderId).toBe('ord-1');
-    expect(input).toEqual({ items: [{ productId: 'p1', quantity: '2', reason: null }], reason: null });
+    expect(input).toEqual({
+      items: [{ productId: 'p1', quantity: '2', reason: null }],
+      reason: null,
+    });
     expect(typeof key).toBe('string');
     expect((key as string).length).toBeGreaterThan(0);
     // No server-derived fields in the payload.
-    expect(JSON.stringify(input)).not.toMatch(/companyId|warehouseId|price|subtotal|total|tax|status/i);
+    expect(JSON.stringify(input)).not.toMatch(
+      /companyId|warehouseId|price|subtotal|total|tax|status/i,
+    );
 
     const no = await screen.findByTestId('created-return-no');
     expect(no.textContent).toBe('RET-20260101-ABCDEF0123');

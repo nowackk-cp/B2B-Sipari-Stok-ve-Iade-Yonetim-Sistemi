@@ -162,9 +162,7 @@ describe('Order lifecycle actions — approve', () => {
     await waitFor(() => expect(approveOrder).toHaveBeenCalledTimes(1));
     // Only the public id is sent — no body object with companyId/price/tax/total.
     expect(approveOrder.mock.calls[0]).toEqual(['ord-1']);
-    await waitFor(() =>
-      expect(listOrders.mock.calls.length).toBeGreaterThan(ordersBefore),
-    );
+    await waitFor(() => expect(listOrders.mock.calls.length).toBeGreaterThan(ordersBefore));
     await waitFor(() => expect(getOrder.mock.calls.length).toBeGreaterThan(detailBefore));
   });
 

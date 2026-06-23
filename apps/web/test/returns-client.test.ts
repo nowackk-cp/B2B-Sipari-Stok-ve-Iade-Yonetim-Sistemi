@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  approveReturn,
-  createReturn,
-  getReturn,
-  listReturns,
-} from '../src/lib/returns-client';
+import { approveReturn, createReturn, getReturn, listReturns } from '../src/lib/returns-client';
 import { setAccessToken } from '../src/lib/auth-client';
 
 function mockFetch(body: BodyInit | null, init: ResponseInit) {
@@ -70,7 +65,9 @@ describe('returns-client', () => {
       items: [{ productId: 'p1', quantity: '2', reason: 'damaged' }],
       reason: null,
     });
-    expect(JSON.stringify(body)).not.toMatch(/companyId|warehouseId|price|subtotal|total|tax|status/i);
+    expect(JSON.stringify(body)).not.toMatch(
+      /companyId|warehouseId|price|subtotal|total|tax|status/i,
+    );
   });
 
   it('approves a return via POST returns/:id/approve with the Idempotency-Key header and no body', async () => {

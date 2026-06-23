@@ -11,7 +11,12 @@ type ActiveFilter = 'all' | 'active' | 'inactive';
 
 type ListState =
   | { status: 'loading' }
-  | { status: 'ready'; warehouses: WarehouseView[]; hasNextPage: boolean; nextCursor: string | null }
+  | {
+      status: 'ready';
+      warehouses: WarehouseView[];
+      hasNextPage: boolean;
+      nextCursor: string | null;
+    }
   | { status: 'error'; message: string };
 
 type Modal =

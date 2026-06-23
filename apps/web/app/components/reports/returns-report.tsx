@@ -132,8 +132,16 @@ export function ReturnsReport({ warehouses }: { warehouses: WarehouseOption[] })
       {state.status === 'ready' && state.data.returnCount > 0 ? (
         <div className="card-grid" data-testid="returns-report-cards">
           <StatCard label="Returns" value={state.data.returnCount} testId="returns-report-total" />
-          <StatCard label="Requested" value={state.data.requestedCount} testId="returns-report-requested" />
-          <StatCard label="Approved" value={state.data.approvedCount} testId="returns-report-approved" />
+          <StatCard
+            label="Requested"
+            value={state.data.requestedCount}
+            testId="returns-report-requested"
+          />
+          <StatCard
+            label="Approved"
+            value={state.data.approvedCount}
+            testId="returns-report-approved"
+          />
           <StatCard
             label="Returned quantity"
             value={formatQuantity(state.data.totalReturnedQuantity)}

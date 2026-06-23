@@ -30,9 +30,7 @@ afterEach(() => {
 
 describe('auth-client', () => {
   it('login stores the access token in memory and returns the profile', async () => {
-    const fn = stubFetch(
-      async () => new Response(JSON.stringify(SESSION), { status: 200 }),
-    );
+    const fn = stubFetch(async () => new Response(JSON.stringify(SESSION), { status: 200 }));
 
     const user = await login('ops@b2b.local', 'pw');
 

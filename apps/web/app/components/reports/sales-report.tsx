@@ -149,7 +149,10 @@ export function SalesReport({ warehouses }: { warehouses: WarehouseOption[] }) {
               </thead>
               <tbody>
                 {rows.map((r) => (
-                  <tr key={`${r.period}-${r.currency}`} data-testid={`sales-row-${r.period}-${r.currency}`}>
+                  <tr
+                    key={`${r.period}-${r.currency}`}
+                    data-testid={`sales-row-${r.period}-${r.currency}`}
+                  >
                     <td>{r.period}</td>
                     <td>{r.currency}</td>
                     <td className="num">{r.invoiceCount}</td>

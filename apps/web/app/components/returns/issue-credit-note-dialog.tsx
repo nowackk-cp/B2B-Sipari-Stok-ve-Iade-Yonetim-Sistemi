@@ -3,10 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import type { CreditNoteView, ReturnView } from '@b2b/contracts';
-import {
-  issueCreditNoteForReturn,
-  problemMessages,
-} from '../../../src/lib/credit-notes-client';
+import { issueCreditNoteForReturn, problemMessages } from '../../../src/lib/credit-notes-client';
 import { newIdempotencyKey } from '../../../src/lib/idempotency';
 import { Modal } from '../modal';
 
@@ -54,9 +51,8 @@ export function IssueCreditNoteDialog({
       {issued ? (
         <div data-testid="return-credit-note-success">
           <p>
-            Credit note{' '}
-            <strong data-testid="issued-credit-note-no">{issued.creditNoteNo}</strong> was issued for
-            return <strong>{ret.returnNo}</strong>.
+            Credit note <strong data-testid="issued-credit-note-no">{issued.creditNoteNo}</strong>{' '}
+            was issued for return <strong>{ret.returnNo}</strong>.
           </p>
           <div className="modal-actions">
             <button type="button" className="button" onClick={onClose}>

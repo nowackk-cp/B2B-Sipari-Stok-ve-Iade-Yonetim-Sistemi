@@ -35,9 +35,18 @@ function isTab(value: string | null): value is TabKey {
  */
 function ReportsView() {
   const searchParams = useSearchParams();
-  const initialTab = searchParams.get('tab');
-  const [tab, setTab] = useState<TabKey>(isTab(initialTab) ? initialTab : 'sales');
+  const tabParam = searchParams.get('tab');
+  const [tab, setTab] = useState<TabKey>(isTab(tabParam) ? tabParam : 'sales');
   const [warehouses, setWarehouses] = useState<WarehouseOption[]>([]);
+
+  // Keep the selected tab in sync with `?tab=` for same-route navigation. The
+  // App Router does not remount this page when only the query changes (e.g.
+  // clicking the Inventory sidebar entry while already on /reports), so the
+  // once-seeded initial state would otherwise go stale. A manual tab click does
+  // not touch the URL, so `tabParam` is unchanged and this effect is a no-op.
+  useEffect(() => {
+    if (isTab(tabParam)) setTab(tabParam);
+  }, [tabParam]);
 
   useEffect(() => {
     let active = true;
