@@ -142,7 +142,7 @@ without external services.
 | `--filter @b2b/web typecheck`| **PASS**                                     |
 | `--filter @b2b/web build`    | **PASS** — all routes prerender, `/reports` OK|
 | `--filter @b2b/web lint`     | n/a — package has no `lint` script (root lint covers it) |
-| `--filter @b2b/web test:e2e` | **BLOCKED (non-blocking)** — real API + Next prod server boot on real PG, but `global-setup` cannot seed the E2E user: `apps/api/scripts/seed-e2e-user.mjs` omits the now-required `company` relation (harness predates company-scoping). Root cause is harness code, not stack availability. See §6. |
+| `--filter @b2b/web test:e2e` | **PASS** — 19/19 against a real PostgreSQL test DB + built API + freshly-built Next server. The seed-harness defect is fixed (`seed-e2e-user.mjs` now pins the E2E user to a company and grants SYSTEM_ADMIN + warehouse scope; the Playwright web build inlines `NEXT_PUBLIC_API_BASE_URL`). Covers auth (login/wrong-creds/session-renewal/no-token-storage/logout/redirect), navigation (every sidebar route + Inventory tab + deep logout + unauthenticated redirect), reports (all three tabs reach a terminal state), and per-module page/modal smokes. |
 
 ### Repo-wide
 
@@ -188,14 +188,24 @@ green result here, not a prior run elsewhere, is what release approval depends o
 > blocking release gate and was executed green (see §5). Only the items below are
 > genuinely non-blocking.
 
-- **Web Playwright smoke is currently blocked by a harness defect, not by the
-  stack.** With a real PostgreSQL test DB the built API and `next start` boot
-  fine, but `apps/api/scripts/seed-e2e-user.mjs` calls `prisma.user.create()`
-  without the now-required `company` relation (`User.companyId` became mandatory
-  with company-scoping), so `global-setup` aborts before any spec runs. This is a
-  test-harness code fix (out of scope for this doc-only task); it does not affect
-  the backend gate result. The Vitest component suite (180) and the backend gate
-  both cover behaviour in the meantime.
+- ~~Web Playwright smoke is blocked by a harness defect~~ **— RESOLVED (Final
+  Non-Blocking Closure).** Two harness bugs were fixed (no production code
+  touched): (1) `apps/api/scripts/seed-e2e-user.mjs` now runs the canonical
+  idempotent system seed and pins the E2E user to the default company, then
+  assigns the same company's SYSTEM_ADMIN role and an explicit warehouse scope —
+  `User.companyId` is no longer omitted; (2) `apps/web/playwright.config.ts` now
+  builds the Next app *inside* the web `webServer` with `NEXT_PUBLIC_API_BASE_URL`
+  set, because that value is inlined at build time (setting it only for `next
+  start` left the browser's `apiBaseUrl()` throwing "not configured" and login
+  silently failing). It also defaults the required `PASSWORD_RESET_DELIVERY_KEY`
+  so the API boots. A substring-ambiguous `getByLabel('code')` selector in
+  `warehouses.spec.ts` was made exact. Result: **19/19 E2E green** on a real
+  PostgreSQL test DB. See §5 and DEMO_RUNBOOK §10.
+- **Redis production runtime.** The API/DB gate does not need Redis (in-memory
+  rate limiter; login throttle fails open with PostgreSQL lockout authoritative),
+  but the running app still expects `REDIS_URL`. Provision and monitor Redis in
+  production for the login throttle + queue transport. This is a deployment
+  checklist item, not a code gap.
 - README top-of-file status still reads "Foundation Milestone 1A"; consider
   refreshing it to reflect the implemented modules (left as-is here to avoid
   scope creep beyond demo polish).

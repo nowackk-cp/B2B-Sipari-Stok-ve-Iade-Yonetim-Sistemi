@@ -35,5 +35,6 @@ test('opens the new-warehouse modal', async ({ page }) => {
   await page.goto('/warehouses');
   await page.getByTestId('open-create').click();
   await expect(page.getByTestId('warehouse-form-modal')).toBeVisible();
-  await expect(page.getByLabel('code')).toBeVisible();
+  // exact: the form also has a "postalCode" field — a substring match is ambiguous.
+  await expect(page.getByLabel('code', { exact: true })).toBeVisible();
 });

@@ -208,9 +208,11 @@ These are **intentional** for this milestone — call them out during the demo:
   and totals; there is no rendered PDF/print artifact.
 - **No live/cloud deployment.** The demo runs against the local stack; there is
   no hosted environment or deploy pipeline wired up.
-- **Some flows need the live stack to E2E.** Playwright smoke (login + every
-  route + the seeded workflow) requires a real PostgreSQL-backed API + web. The
-  unit/component suite (Vitest, 180 tests) runs without any stack. See §10.
+- **Playwright smoke needs the live stack.** The browser smoke (login + every
+  route + reports tabs) requires a real PostgreSQL-backed API + web; it is green
+  (19/19) on that stack. The unit/component suite (Vitest, 180 tests) runs
+  without any stack. The full create→…→credit-note workflow stays a manual demo
+  (§8), not an automated gate. See §10.
 - **No payments / notifications / email features** beyond password-reset
   delivery to the dev SMTP sink.
 - **No implicit warehouse access.** Even SYSTEM_ADMIN needs `warehouse:scope:all`
@@ -232,34 +234,69 @@ These are **intentional** for this milestone — call them out during the demo:
 > 16 test database (+ a separate `SHADOW_DATABASE_URL` for `db:drift`). The API
 > gate uses an in-memory rate limiter, so **Redis is not required** for it; the
 > running app still expects `REDIS_URL` (login throttle fails open if Redis is
-> down — PostgreSQL stays authoritative).
->
-> **Known harness gap (web E2E):** `apps/api/scripts/seed-e2e-user.mjs` does not
-> yet set the now-required `company` relation on the seeded user, so
-> `global-setup` fails before the Playwright specs run even with a live stack.
-> This is a harness fix, separate from the backend gate above. Until it lands, use
-> the manual flow in §8 plus the Vitest component suite for frontend coverage.
+> down — PostgreSQL stays authoritative). **Provision Redis for production
+> runtime** (login throttle + queue transport) — it is a deployment requirement,
+> not a gate requirement.
 
-The web Playwright suite boots the **real** built API + web and seeds a
-deterministic user (`apps/web/e2e/global-setup.ts`). It requires `DATABASE_URL`
-pointing at a **test** database (name must contain `test`):
+### Web E2E (Playwright) — runnable on the live stack
+
+The web Playwright suite boots the **real** built API + a freshly-built Next
+server and seeds a deterministic user via `apps/web/e2e/global-setup.ts`
+(→ `apps/api/scripts/seed-e2e-user.mjs`). The seed is self-contained and
+idempotent: it runs the canonical system seed (default company + roles +
+warehouse + invoice series) and then **pins the E2E user to that company** with a
+SYSTEM_ADMIN role and an explicit warehouse scope, so every screen loads. It
+refuses any database whose name does not contain `test`.
+
+Required: `DATABASE_URL` pointing at a real **test** PostgreSQL (name must
+contain `test`). Optional overrides: `E2E_USER_EMAIL`, `E2E_USER_PASSWORD`,
+`E2E_USER_NAME`, `E2E_WAREHOUSE_CODE`. `PASSWORD_RESET_DELIVERY_KEY` and
+`JWT_ACCESS_SECRET` are defaulted to throwaway test values by the Playwright
+config when unset. Redis is not required (rate limiter fails open).
 
 ```bash
-# build first so `node dist/main.js` (API) and `next start` (web) are runnable
+# build the workspace packages first (the API runs node dist/main.js;
+# the web webServer rebuilds itself with NEXT_PUBLIC_API_BASE_URL inlined)
 pnpm build
+# apply migrations to the test DB (schema), then run the suite (it seeds data)
+DATABASE_URL=postgresql://b2b:b2b@localhost:5432/b2b_test \
+  pnpm --filter @b2b/database db:migrate:deploy
 DATABASE_URL=postgresql://b2b:b2b@localhost:5432/b2b_test \
   pnpm --filter @b2b/web test:e2e
 ```
 
-Smoke coverage (`apps/web/e2e/`): auth (login / wrong-credentials / session
-renewal / no-token-in-storage / logout / protected-route redirect),
-`navigation.spec.ts` (every sidebar destination loads + Inventory tab + deep
-logout + unauthenticated deep-route redirect), plus per-module page smokes
-(products, warehouses, customers, returns, credit-notes, reports).
+> Why the web rebuilds: `NEXT_PUBLIC_*` values are inlined into the browser
+> bundle at **build** time. The Playwright `webServer` therefore runs `next
+> build && next start` with `NEXT_PUBLIC_API_BASE_URL` set, so the browser hits
+> the E2E API. A plain `pnpm build` without that env would bake in an unconfigured
+> URL and login would silently fail.
+
+Smoke coverage (`apps/web/e2e/`, **19 specs, all green** on a real stack): auth
+(login / wrong-credentials / session renewal / no-token-in-storage / logout /
+protected-route redirect), `navigation.spec.ts` (every sidebar destination loads
++ Inventory tab + deep logout + unauthenticated deep-route redirect),
+`reports.spec.ts` (sales / inventory / returns tabs each reach a terminal state),
+plus per-module page + modal smokes (products, warehouses, customers, returns,
+credit-notes). The full create→approve→ship→invoice→return→credit-note workflow
+is **not** an automated gate (kept as the manual demo in §8 to avoid flakiness);
+navigation + reports smoke are the mandatory automated gate.
 
 If you have no live stack, do **not** mark E2E as passed — run the manual flow in
 §8 instead and the Vitest suite for component coverage:
 
 ```bash
 pnpm --filter @b2b/web test     # 180 component/unit tests, no stack required
+```
+
+### One-shot final gate
+
+`scripts/final-gate.ps1` sequences every gate below in order and fails closed on
+the first red (it only wraps the same `pnpm` scripts — no behaviour change):
+
+```powershell
+$env:DATABASE_URL        = 'postgresql://b2b:b2b@127.0.0.1:55432/b2b_gate_test?schema=public'
+$env:SHADOW_DATABASE_URL = 'postgresql://b2b:b2b@127.0.0.1:55432/b2b_gate_shadow_test?schema=public'
+pwsh scripts/final-gate.ps1            # backend + frontend + root + E2E
+pwsh scripts/final-gate.ps1 -SkipE2e    # skip the browser smoke
+pwsh scripts/final-gate.ps1 -SkipBackend # frontend + root only (no PostgreSQL)
 ```
