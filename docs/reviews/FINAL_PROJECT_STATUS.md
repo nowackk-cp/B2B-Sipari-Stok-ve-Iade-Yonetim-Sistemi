@@ -121,11 +121,18 @@ cc8dc06 feat(warehouses): warehouse management API foundation
 
 ---
 
-## 5. Gate results (this task's run)
+## 5. Gate results
 
-Run on the local Windows dev box. Frontend + repo-wide gates run without external
-services; the backend DB/API gates require a real PostgreSQL, which is **not
-provisioned in this environment** — they are reported as NOT RUN, not passed.
+The backend DB/API **final release gate** was re-run against a real PostgreSQL 16
+instance (see the backend table below); the frontend + repo-wide gates run
+without external services.
+
+> **Demo-ready ≠ release-ready.** The happy path can be walked for a demo against
+> any local stack. **Release approval additionally requires the real-PostgreSQL
+> backend gate below to execute and pass in the approving environment.** A green
+> run recorded elsewhere ("last known green") is historical reference only and is
+> **never** a substitute. If the final backend gate is **NOT RUN**, it must be
+> treated as **BLOCKING**, not as remaining non-blocking work.
 
 ### Frontend (apps/web)
 
@@ -135,7 +142,7 @@ provisioned in this environment** — they are reported as NOT RUN, not passed.
 | `--filter @b2b/web typecheck`| **PASS**                                     |
 | `--filter @b2b/web build`    | **PASS** — all routes prerender, `/reports` OK|
 | `--filter @b2b/web lint`     | n/a — package has no `lint` script (root lint covers it) |
-| `--filter @b2b/web test:e2e` | **NOT RUN** — needs live PostgreSQL-backed API + web |
+| `--filter @b2b/web test:e2e` | **BLOCKED (non-blocking)** — real API + Next prod server boot on real PG, but `global-setup` cannot seed the E2E user: `apps/api/scripts/seed-e2e-user.mjs` omits the now-required `company` relation (harness predates company-scoping). Root cause is harness code, not stack availability. See §6. |
 
 ### Repo-wide
 
@@ -149,29 +156,46 @@ provisioned in this environment** — they are reported as NOT RUN, not passed.
 | `pnpm check:no-skip`  | **PASS**                     |
 | `pnpm check:docs`     | **PASS** — all links resolve |
 
-### Backend (require real PostgreSQL — NOT RUN here)
+### Backend (real PostgreSQL — EXECUTED, final release gate)
 
-| Gate                                              | Result   |
-| ------------------------------------------------- | -------- |
-| `--filter @b2b/api test:integration` (API gate)   | NOT RUN  |
-| `--filter @b2b/database test:database-gate`       | NOT RUN  |
-| `db:migrate:deploy` (clean DB, then 2nd time)     | NOT RUN  |
-| `db:seed` ×2 (idempotency)                        | NOT RUN  |
-| `db:drift` / `db:verify-catalog`                  | NOT RUN  |
-| `prisma validate` / `prisma generate`             | NOT RUN  |
+Re-run on real PostgreSQL 16 on **2026-06-24** (DB `b2b_final_test`, shadow
+`b2b_final_shadow_test`, port 55432). This is the **final release gate** — its
+green result here, not a prior run elsewhere, is what release approval depends on.
+
+| Gate                                              | Result                                                                 |
+| ------------------------------------------------- | ---------------------------------------------------------------------- |
+| `--filter @b2b/api test:integration` (API gate)   | **PASS** — 576/576 real-PostgreSQL tests, 0 skipped                     |
+| `--filter @b2b/database test:database-gate`       | **PASS** — 133/133 real-PostgreSQL tests, 0 skipped                     |
+| `db:migrate:deploy` clean DB, then 2nd run        | **PASS** — 21 migrations applied; 2nd run "No pending migrations" (idempotent) |
+| `db:seed` ×2 (idempotency)                        | **PASS** — identical both runs: 69 permissions, 229 role_permissions, 6 roles, 1 company, 1 warehouse, 1 invoice series |
+| `db:drift`                                        | **PASS** — 0 unexpected (7 allowlisted partial-unique statements)      |
+| `db:verify-catalog`                               | **PASS** — required triggers, partial-unique indexes, CHECKs, non-cascading FKs present |
+| `prisma validate` / `prisma generate`            | **PASS**                                                               |
 
 > No backend production, schema, domain, or contract files changed in this task
-> (changes are limited to `apps/web` UI/test + docs), so the backend gates are
-> unaffected by this PR. CI must still run them against a real PostgreSQL before
-> merge. Last known-green backend run (per project memory, 2026-06-19): DB
-> 133/133, API 475/475, 0 skipped.
+> (changes are limited to `apps/web` UI/test + docs). The numbers above are the
+> real gate result on this commit's backend; the historical 2026-06-19 run (DB
+> 133/133, API 475/475) is reference only and is superseded by this run. The API
+> gate uses an in-memory rate limiter, so Redis is not required for it; Redis was
+> not reachable in this environment and the login throttle fails open (the durable
+> PostgreSQL lockout stays authoritative).
 
 ---
 
 ## 6. Remaining non-blocking work
 
-- Run the backend DB + API gates and the web Playwright smoke against a real
-  PostgreSQL stack in CI (not possible in this local environment).
+> The real-PostgreSQL backend DB + API gate is **not** in this list — it is a
+> blocking release gate and was executed green (see §5). Only the items below are
+> genuinely non-blocking.
+
+- **Web Playwright smoke is currently blocked by a harness defect, not by the
+  stack.** With a real PostgreSQL test DB the built API and `next start` boot
+  fine, but `apps/api/scripts/seed-e2e-user.mjs` calls `prisma.user.create()`
+  without the now-required `company` relation (`User.companyId` became mandatory
+  with company-scoping), so `global-setup` aborts before any spec runs. This is a
+  test-harness code fix (out of scope for this doc-only task); it does not affect
+  the backend gate result. The Vitest component suite (180) and the backend gate
+  both cover behaviour in the meantime.
 - README top-of-file status still reads "Foundation Milestone 1A"; consider
   refreshing it to reflect the implemented modules (left as-is here to avoid
   scope creep beyond demo polish).

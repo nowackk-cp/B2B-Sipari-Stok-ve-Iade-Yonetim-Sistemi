@@ -8,6 +8,12 @@ for behaviour remains [PROJECT_SPEC.md](../../PROJECT_SPEC.md) and `docs/`.
 > in [FINAL_PROJECT_STATUS.md](../reviews/FINAL_PROJECT_STATUS.md) is implemented
 > and reviewed end-to-end (API + UI), but a few capabilities are intentionally
 > out of scope for the demo — see [Known limitations](#9-known-limitations).
+>
+> **Demo-ready ≠ release-ready.** This runbook gets you to a working demo against a
+> local stack. Release approval additionally requires the **final backend gate**
+> (DB + API integration on a real PostgreSQL) to run green in the approving
+> environment — a live stack, not a recorded prior run. See
+> [§10](#10-smoke--e2e-optional-needs-the-live-stack).
 
 ---
 
@@ -216,6 +222,23 @@ These are **intentional** for this milestone — call them out during the demo:
 ---
 
 ## 10. Smoke / E2E (optional, needs the live stack)
+
+> **Final release gate (live stack required).** Release approval depends on the
+> real-PostgreSQL backend gate — `pnpm --filter @b2b/api test:integration`,
+> `pnpm --filter @b2b/database test:database-gate`, `db:migrate:deploy` (clean DB
+> then a second idempotent run), `db:seed` ×2, `db:drift`, `db:verify-catalog`.
+> These are **fail-closed**: with no reachable PostgreSQL they exit non-zero
+> ("TESTS NOT EXECUTED"), never a false green. Run them against a real PostgreSQL
+> 16 test database (+ a separate `SHADOW_DATABASE_URL` for `db:drift`). The API
+> gate uses an in-memory rate limiter, so **Redis is not required** for it; the
+> running app still expects `REDIS_URL` (login throttle fails open if Redis is
+> down — PostgreSQL stays authoritative).
+>
+> **Known harness gap (web E2E):** `apps/api/scripts/seed-e2e-user.mjs` does not
+> yet set the now-required `company` relation on the seeded user, so
+> `global-setup` fails before the Playwright specs run even with a live stack.
+> This is a harness fix, separate from the backend gate above. Until it lands, use
+> the manual flow in §8 plus the Vitest component suite for frontend coverage.
 
 The web Playwright suite boots the **real** built API + web and seeds a
 deterministic user (`apps/web/e2e/global-setup.ts`). It requires `DATABASE_URL`
