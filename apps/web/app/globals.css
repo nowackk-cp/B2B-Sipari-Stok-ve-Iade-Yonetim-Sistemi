@@ -509,6 +509,50 @@ a {
   margin-top: 0.9rem;
 }
 
+/* ---------- Segmented control (Reports tabs) ---------- */
+.segmented {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  margin: 0.25rem 0 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+}
+
+.segmented-item {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  padding: 0.4rem 1rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.segmented-item:hover {
+  color: var(--text);
+}
+
+.segmented-item.is-active {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 650;
+}
+
+.toolbar-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.toolbar-check input {
+  width: 1rem;
+  height: 1rem;
+}
+
 /* ---------- Modal ---------- */
 .modal-overlay {
   position: fixed;

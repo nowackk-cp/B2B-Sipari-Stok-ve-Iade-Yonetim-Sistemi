@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatMoney } from '../src/lib/money';
+import { formatMoney, formatQuantity } from '../src/lib/money';
 
 describe('formatMoney', () => {
   it('formats a normal minor-unit amount with grouping and the currency', () => {
@@ -18,5 +18,24 @@ describe('formatMoney', () => {
 
   it('handles a negative amount and zero-fraction currencies', () => {
     expect(formatMoney('-100', 'TRY')).toMatch(/^-/);
+  });
+});
+
+describe('formatQuantity', () => {
+  it('groups a normal integer quantity', () => {
+    expect(formatQuantity('1234567')).toBe('1.234.567');
+  });
+
+  it('keeps full precision for quantities beyond Number.MAX_SAFE_INTEGER', () => {
+    // Number('9007199254740993') rounds to ...992; BigInt grouping keeps the 93.
+    const out = formatQuantity('9007199254740993');
+    expect(out.replace(/\D/g, '')).toBe('9007199254740993');
+    expect(out).not.toContain('992');
+  });
+
+  it('renders a neutral dash for null/empty', () => {
+    expect(formatQuantity(null)).toBe('—');
+    expect(formatQuantity('')).toBe('—');
+    expect(formatQuantity(undefined)).toBe('—');
   });
 });

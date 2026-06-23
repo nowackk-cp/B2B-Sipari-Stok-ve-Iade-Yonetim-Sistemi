@@ -45,3 +45,21 @@ export function formatMoneyList(list: MoneyView[] | null | undefined, locale = '
   if (!list || list.length === 0) return '—';
   return list.map((m) => formatMoney(m.amount, m.currency, locale)).join(' · ');
 }
+
+/**
+ * Format a BIGINT quantity for display.
+ *
+ * Quantities cross the wire as integer STRINGS (stock figures can exceed the JS
+ * safe-integer range — CLAUDE.md Mutlak Kural #3 precision safety). We never
+ * `Number()` the value: the digits are grouped via `BigInt`, so arbitrarily
+ * large counts stay exact. `null`/empty collapses to a neutral dash so cells
+ * never blow up on absent data.
+ */
+export function formatQuantity(value: string | null | undefined, locale = 'tr-TR'): string {
+  if (value === null || value === undefined || value.trim() === '') return '—';
+  const negative = value.trim().startsWith('-');
+  const digits = value.trim().replace(/^[+-]/, '').replace(/\D/g, '');
+  if (digits === '') return value; // non-numeric — render verbatim rather than lie
+  const grouped = new Intl.NumberFormat(locale).format(BigInt(digits));
+  return `${negative ? '-' : ''}${grouped}`;
+}
