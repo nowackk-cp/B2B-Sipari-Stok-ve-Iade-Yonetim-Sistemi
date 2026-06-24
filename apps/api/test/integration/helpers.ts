@@ -160,6 +160,23 @@ export async function createTestApp(opts: CreateTestAppOptions = {}): Promise<Te
   configureApp(app, app.get(AppConfigService));
   await app.init();
 
+  // Bind the HTTP server to an ephemeral port up front. supertest's `Test`
+  // constructor lazily calls `server.listen(0)` the first time a request touches
+  // an unbound server; when several requests fire concurrently as that first
+  // touch (the concurrency suites' `Promise.all`), they race to bind the same
+  // server and the loser's socket is reset (`read ECONNRESET`). Listening once
+  // here means `server.address()` is always set, so supertest never lazy-binds
+  // and the race cannot occur. `app.close()` (in closeTestApp) closes it.
+  const httpServer = app.getHttpServer() as import('http').Server;
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error): void => reject(err);
+    httpServer.once('error', onError);
+    httpServer.listen(0, () => {
+      httpServer.removeListener('error', onError);
+      resolve();
+    });
+  });
+
   const prisma = new PrismaClient();
   await resetDatabase(prisma);
 
