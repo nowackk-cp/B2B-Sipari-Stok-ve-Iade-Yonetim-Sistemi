@@ -48,3 +48,7 @@ Thumbs.db
 
 # Docker local data (named volumes are managed by docker, but ignore any bind dirs)
 infra/data/
+
+# Local agent / personal dev helpers (not part of the project)
+.claude/
+dev-load-env.ps1

@@ -1,134 +1,117 @@
 # Final Release Readiness Review
 
-Reviewed commit (before fix): `b4cfdf0`
+Commit: `4bdf28d`
 Branch: `feat/web-app-shell-auth-dashboard`
-Scope: Final API Gate Blocker Fix (FNB-001 follow-up).
-Result: `FINAL_BLOCKER_FIXED`
+Scope: Final API Gate Blocker Fix follow-up.
+Result: `FINAL_APPROVED_WITH_NON_BLOCKING_NOTES`
 
-## Previous reject reason
+## Decision
 
-The prior review (`b4cfdf0`) returned `FINAL_REJECTED` because the full API
-integration gate was red on real PostgreSQL: 575/576 passed, 1 failed. The
-failure was `apps/api/test/integration/credit-notes.test.ts`:
-`17. concurrent credit notes of DIFFERENT returns produce gapless, unique
-numbers`, error `read ECONNRESET`. A targeted rerun reproduced the same
-`read ECONNRESET`, so it was not just a long-suite timeout artifact.
+The previous blocker is fixed. The failing API gate from the prior review was
+`credit-notes.test.ts` test 17 with `read ECONNRESET`, leaving the full API gate
+at 575/576. Commit `4bdf28d` changes only the API integration test harness and
+this review document. It does not change production business logic, database
+schema, migrations, auth/security model, or credit-note gapless/idempotency
+logic.
 
-## Root cause
+The fix is present in `apps/api/test/integration/helpers.ts`: after
+`await app.init()`, `createTestApp` binds the Nest HTTP server once with
+`httpServer.listen(0)` and waits for the listening callback. This removes
+supertest's lazy first-request bind race when a test's first HTTP requests start
+concurrently.
 
-The failure is a **test-harness flake, not a production bug** — the API server
-never crashes. With temporary `process.on('uncaughtException')` /
-`process.on('unhandledRejection')` probes installed, the failing run produced
-**no uncaught exception, no unhandled rejection, and no Nest/Prisma error log**.
-The server stays alive; only the supertest client socket is reset.
+## Findings
 
-The reset comes from **supertest's lazy server bind**. supertest's `Test`
-constructor (`supertest@7.0.0/lib/test.js`, `serverAddress`) does:
+### FNB-002
 
-```js
-const addr = app.address();
-if (!addr) this._server = app.listen(0);
-const port = app.address().port;
-```
+Severity: LOW
 
-The integration harness (`createTestApp`) calls `await app.init()` but never
-binds the HTTP server, so it is unbound until the first request touches it.
-Test 17's first server interaction is `Promise.all([creditableReturn ×4])`,
-which fires its first HTTP requests concurrently. When test 17 is the first
-test to touch the server (e.g. a targeted `-t` run, or whichever ordering the
-full gate happened to hit), all four concurrent requests see `app.address()`
-== null and each calls `app.listen(0)` on the *same* server. The concurrent
-double-bind resets the losing socket → `read ECONNRESET`.
+Sorun: `scripts/final-gate.ps1` skip modes can still be misreported if someone
+copies only the final output.
 
-This is why the bug is order-dependent and flaky:
-- Full `credit-notes.test.ts` run: test 1 runs sequentially first and binds the
-  server, so test 17 never races → passes.
-- Targeted `-t "17"` run: test 17 is first; its 4 concurrent requests race the
-  bind → intermittent `read ECONNRESET` (reproduced 1/3, then again after a
-  controlled set of runs).
+Kanit:
+- This is the existing non-blocking note from the previous review.
+- `-SkipE2e` and `-SkipBackend` are intentionally out of scope for commit
+  `4bdf28d`.
+- The full gates were run manually in this review, so this did not affect the
+  approval decision for the API blocker fix.
 
-Confirmed reproduction (before fix): targeted run RUN 1 = `read ECONNRESET`,
-RUN 2/3 = pass. An isolated single-test repro whose first request was an
-*awaited* (sequential) login always passed — pinning the cause to the
-concurrent-first-touch bind, not the credit-note business path.
+Etki: A future partial gate run could be mistaken for a full release gate if the
+operator ignores the skip flags.
 
-## Fix
+Onerilen duzeltme: Make skip-mode output say `PARTIAL GATE PASSED` and list the
+skipped gate classes.
 
-### Fix type
+Gerekli test:
+- `pwsh scripts/final-gate.ps1 -SkipE2e`
+- `pwsh scripts/final-gate.ps1 -SkipBackend`
 
-- **Test harness fix.** No production code, no DB schema/migration, no
-  RBAC/auth/stock/order/invoice/return change, no credit-note
-  gapless/idempotency change.
+## Verification
 
-### Files changed
-
-- `apps/api/test/integration/helpers.ts` — in `createTestApp`, after
-  `app.init()`, bind the HTTP server once to an ephemeral port
-  (`httpServer.listen(0)`), awaiting the `listening` callback (and rejecting on
-  `error`). Because `server.address()` is then always set, supertest never
-  lazy-binds and the concurrent double-`listen(0)` race cannot occur. The server
-  is still the real Nest HTTP app over real PostgreSQL; `closeTestApp` →
-  `app.close()` closes it.
-
-No other files are modified. Temporary diagnostic probes
-(`setup-integration.ts` listeners) and a scratch diagnostic test were added
-during investigation and fully removed; `git diff` shows a single changed file.
-
-### Behaviour preserved
-
-- Credit-note gapless numbering and idempotency contracts unchanged — test 17
-  still asserts `[1, 2, 3, 4]`, tests 5/6/7/18/19/19b still assert the
-  same-return 409, same-key replay, gapless-after-rollback, and
-  exactly-one-winner semantics, all green.
-- No test skipped, no `.only`, no conditional skip, no loosened assertion, no
-  raised timeout. Tests still run against real PostgreSQL and the real
-  HTTP/Nest app.
-
-## Evidence (real PostgreSQL, `127.0.0.1:55432`)
+### Commit And Scope
 
 | Check | Result |
 | --- | --- |
-| Targeted test 17 (×5 after fix) | PASS 5/5, 0 `ECONNRESET` (was flaky before) |
-| `credit-notes.test.ts` full file | PASS 26/26 |
-| Full API gate `pnpm --filter @b2b/api test:integration` | PASS **576/576**, 0 skipped (exit 0) |
-| DB gate `test:database-gate` | PASS **133/133**, 0 skipped |
-| migrate deploy (clean DB, #1) | PASS, all migrations applied |
-| migrate deploy (#2, idempotent) | PASS, "No pending migrations to apply" |
-| seed ×2 | PASS, idempotent (69 perms / 229 rolePermissions / 6 roles / 1 company) |
-| drift (`db:drift`) | PASS, 7 allowlisted partial-unique, 0 unexpected |
-| verify catalog (`db:verify-catalog`) | PASS, all triggers/partial-uniques/CHECKs/FKs present |
-| prisma validate / generate | PASS (schema valid; client generated) |
-| root typecheck | PASS, 18/18 Turbo tasks |
-| root build | PASS, 10/10 Turbo tasks |
-| root lint | PASS (eslint, 0 errors) |
-| format:check | PASS, all files Prettier-clean |
-| check:docs | PASS, all relative links resolve |
-| check:no-skip | PASS, no focused/skipped tests |
-| check:boundaries | PASS, package boundaries respected |
-| check:secrets | PASS, no secrets in tracked files |
+| `git log --oneline -5` contains `4bdf28d` | PASS |
+| `git rev-parse --short HEAD` | `4bdf28d` |
+| Changed files in commit | `apps/api/test/integration/helpers.ts`, this review doc |
+| Production business logic changed | No |
+| DB schema/migration changed | No |
+| Auth/security model changed | No |
+| Credit-note gapless/idempotency code changed | No |
+| Test skip/only/assertion loosen/timeout increase | No; `check:no-skip` passed |
 
-Web tests were **not** rerun: no web/shared file changed (only the API
-integration harness). The last recorded green web state stands —
-`@b2b/web test` 180/180 and Playwright E2E 19/19 (real stack) per
-`FINAL_PROJECT_STATUS.md` / commit `b4cfdf0`.
+### Root Cause And Fix
 
-## Answers
+The review evidence in this file and the code diff agree on the root cause:
+this was a test harness race, not a production bug. Before the fix, supertest
+could lazily call `listen(0)` on an unbound server from multiple concurrent
+first requests. After the fix, `createTestApp` binds the server once immediately
+after `app.init()`, so `server.address()` is already set before supertest builds
+requests.
 
-- Skipped tests: **none** (API 576/576, DB 133/133, both 0 skipped).
-- Credit-note gapless/idempotency behaviour changed: **no**.
-- Business logic changed: **no** (test-harness only).
-- Production code changed: **no**.
+### Real PostgreSQL Gates
+
+The successful backend gate rerun used real PostgreSQL on
+`127.0.0.1:55432`, with clean databases:
+`b2b_gate_fix_test` and `b2b_gate_fix_shadow_test`.
+
+| Gate | Result |
+| --- | --- |
+| Targeted `credit-notes.test.ts` test 17 | PASS, 1/1 targeted test passed |
+| Full `credit-notes.test.ts` | PASS, 26/26 |
+| Full API gate `pnpm.cmd --filter @b2b/api test:integration` | PASS, 576/576, 0 skipped |
+| Full DB gate `pnpm.cmd --filter @b2b/database test:database-gate` | PASS, 133/133, 0 skipped |
+| Clean DB `db:migrate:deploy` | PASS, 21 migrations applied |
+| Second `db:migrate:deploy` | PASS, no pending migrations |
+| `db:seed` run 1 | PASS, 69 permissions, 229 role_permissions, 6 roles, 1 company |
+| `db:seed` run 2 | PASS, same counts, idempotent |
+| `db:drift` | PASS, 0 unexpected drift |
+| `db:verify-catalog` | PASS |
+| Prisma validate | PASS |
+| Prisma generate | PASS |
+
+One earlier local API attempt against the older `b2b_final_test` database timed
+out without producing an API gate JSON report and is not counted as a pass. It
+was superseded by the clean-database full API gate above, which completed
+successfully with 576/576 and 0 skipped.
+
+### Root Gates
+
+| Command | Result |
+| --- | --- |
+| `pnpm.cmd typecheck` | PASS, 18/18 Turbo tasks |
+| `pnpm.cmd lint` | PASS |
+| `pnpm.cmd build` | PASS, 10/10 Turbo tasks |
+| `pnpm.cmd format:check` | PASS |
+| `pnpm.cmd check:docs` | PASS |
+| `pnpm.cmd check:no-skip` | PASS |
+| `pnpm.cmd check:boundaries` | PASS |
+| `pnpm.cmd check:secrets` | PASS |
 
 ## Conclusion
 
-The previous blocker (FNB-001, red API gate from `read ECONNRESET` in
-credit-notes test 17) was a supertest lazy-bind race in the integration harness,
-not a production defect. Binding the test HTTP server once up front makes the
-concurrency suite deterministic. The full API gate is now green on real
-PostgreSQL (576/576, 0 skipped), alongside DB 133/133 and all root gates.
-
-`FINAL_BLOCKER_FIXED`
-
-> FNB-002 (the `final-gate.ps1` "ALL GATES PASSED" message after `-SkipE2e` /
-> `-SkipBackend`) was a HIGH, not the release BLOCKER, and is out of scope for
-> this targeted gate-blocker fix; it remains open for a follow-up.
+The `read ECONNRESET` API gate blocker is resolved for commit `4bdf28d`. The
+full API gate and DB gate both passed on real PostgreSQL with zero skipped
+tests. Final approval is granted with a non-blocking note for the existing
+`final-gate.ps1` skip-output polish.

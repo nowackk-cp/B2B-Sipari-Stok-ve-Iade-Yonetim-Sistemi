@@ -5,9 +5,11 @@ const nextConfig = {
   eslint: { ignoreDuringBuilds: true },
   // Type errors must still fail the build.
   typescript: { ignoreBuildErrors: false },
-  experimental: {
-    // Workspace packages are published as compiled dist; nothing extra needed.
-  },
+  // Workspace packages ship compiled dist. In `next dev`, react-refresh injects
+  // `import.meta.webpackHot` into consumed modules; webpack then refuses to parse
+  // the CJS dist ("Cannot use 'import.meta' outside a module"). Transpiling the
+  // package through Next's own pipeline resolves it (no effect on prod builds).
+  transpilePackages: ['@b2b/ui'],
 };
 
 export default nextConfig;
