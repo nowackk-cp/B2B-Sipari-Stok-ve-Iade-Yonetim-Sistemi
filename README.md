@@ -2,6 +2,20 @@
 
 > Sipariş, stok, depo, müşteri, fatura, iade ve raporlama süreçlerini yöneten full-stack B2B operasyon yönetim sistemi.
 
+<details>
+<summary><b>🇬🇧 English summary</b></summary>
+
+**B2B Operations Suite** is a full-stack back-office system for orders, stock, warehouses, customers, invoices, returns and reporting, built as a modular monolith with **NestJS, Next.js, Prisma and PostgreSQL 16**. It goes beyond CRUD: stock and money are never "approximately" right.
+
+- Multi-tenant data with cross-tenant leak tests, deny-by-default RBAC with warehouse-scoped permissions
+- Stock reservation and deduction inside single PostgreSQL transactions with row-level locks and DB invariants
+- Gapless invoice numbering, idempotent shipment / invoice / return / credit-note operations (`Idempotency-Key`)
+- RFC 7807 error contract, Argon2id passwords, rotating refresh tokens with reuse detection
+- Verified on real PostgreSQL: **576/576** API, **133/133** DB, **180/180** web and **19/19** Playwright E2E tests
+
+</details>
+
+
 Bu proje, gerçek bir şirket içi operasyon panelinin (back-office) mantığıyla tasarlanmış,
 **modüler monolit** mimaride bir B2B yönetim sistemidir. Sadece CRUD değildir; **stok
 rezervasyonu, sevkiyat sırasında stok düşümü, gapless fatura numaralandırma, iade ve credit
